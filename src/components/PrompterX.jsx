@@ -171,8 +171,14 @@ export default function PrompterX() {
   }, [aiUploading]);
 
   useEffect(() => {
-    console.log("[PrompterX] runSegments updated", { count: runSegments.length, first3: runSegments.slice(0, 3) });
+    console.log("[PrompterX] runSegments:", JSON.stringify({ count: runSegments.length, firstSeg: runSegments[0] ?? null }));
   }, [runSegments]);
+
+  useEffect(() => {
+    if (screen === "run") {
+      console.log("[PrompterX] run screen mounted:", JSON.stringify({ runSegmentsCount: runSegments.length, aiFormattedRef: aiFormattedRef.current, segmentsRefLen: segmentsRef.current.length }));
+    }
+  }, [screen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!aiToast) return;
@@ -361,8 +367,8 @@ export default function PrompterX() {
   }, []);
 
   const doRun = useCallback((text, ttl, segments, aiFormatted) => {
-    const useAi = !!(aiFormatted && segments?.length);
-    console.log("[PrompterX] doRun", { ttl, aiFormatted, typeof_segments: typeof segments, segCount: segments?.length, useAi, first3: segments?.slice(0, 3) });
+    const useAi = aiFormatted === true && Array.isArray(segments) && segments.length > 0;
+    console.log("[PrompterX] doRun:", JSON.stringify({ title: ttl, aiFormatted, typeof_segs: typeof segments, isArray: Array.isArray(segments), segCount: segments?.length ?? 0, useAi, firstSeg: segments?.[0] ?? null }));
     setScriptText(text); setTitle(ttl);
     segmentsRef.current    = useAi ? segments : [];
     aiFormattedRef.current = useAi;
@@ -567,7 +573,10 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
                 </div>
               </div>
             </div>
-            <button onClick={() => doRun(s.text, s.title, s.segments, s.aiFormatted)}
+            <button onClick={() => {
+                console.log("[PrompterX] script tap:", JSON.stringify({ title: s.title, aiFormatted: s.aiFormatted, segCount: s.segments?.length ?? 0, firstSeg: s.segments?.[0] ?? null }));
+                doRun(s.text, s.title, s.segments, s.aiFormatted);
+              }}
               style={{ background: "rgba(245,166,35,.15)", border: "1px solid rgba(245,166,35,.3)", borderRadius: 8,
                        width: 34, height: 34, color: GOLD, fontSize: 16, cursor: "pointer",
                        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>▶</button>
@@ -725,6 +734,7 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
                       fontSize, lineHeight: 1.8, color: "rgba(255,255,255,.92)",
                       whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "'Courier New',monospace" }}>
 
+          {(() => { console.log("[PrompterX] renderer:", JSON.stringify({ branch: runSegments.length > 0 ? "AI" : "plain", count: runSegments.length, firstSeg: runSegments[0] ?? null })); return null; })()}
           {runSegments.length > 0 ? (
             runSegments.map((seg, i) => {
               const isUrgent    = seg.tone === "urgent";
@@ -740,6 +750,7 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
                     data-seg={i}
                     style={{
                       margin: 0,
+                      background: i === 0 ? "rgba(255,0,0,0.3)" : "transparent",
                       marginTop:    seg.pauseBefore ? "2em"  : "0.5em",
                       marginBottom: seg.pauseAfter  ? "2em"  : "0.5em",
                       fontWeight:   seg.emphasis === "strong" ? 900 : seg.emphasis === "moderate" ? 700 : 400,
