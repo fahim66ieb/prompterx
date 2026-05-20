@@ -15,7 +15,6 @@ Keep reading and the scroll will follow you.`;
 const GOLD = "#f5a623";
 const RED  = "#e84040";
 const fmt  = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-const isoStamp = () => new Date().toISOString().replace("T", "_").replace(/[:.]/g, "-").slice(0, 19);
 
 // AI scroll constants
 const SPEED_MAP  = { slow: 0.55, normal: 1.0, fast: 1.55 };
@@ -28,45 +27,6 @@ function lsLoadScripts() {
 }
 function lsSaveScripts(scripts) {
   try { localStorage.setItem(LS_SCRIPTS, JSON.stringify(scripts)); } catch {}
-}
-
-// ── IndexedDB ─────────────────────────────────────────────────
-const DB_NAME  = "prompterx-recs";
-const DB_STORE = "recs";
-
-function openDB() {
-  return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = e => e.target.result.createObjectStore(DB_STORE, { keyPath: "id" });
-    req.onsuccess  = e => res(e.target.result);
-    req.onerror    = () => rej(req.error);
-  });
-}
-async function dbSave(rec) {
-  const db = await openDB();
-  return new Promise((res, rej) => {
-    const tx = db.transaction(DB_STORE, "readwrite");
-    tx.objectStore(DB_STORE).put(rec);
-    tx.oncomplete = res;
-    tx.onerror    = () => rej(tx.error);
-  });
-}
-async function dbLoad() {
-  const db = await openDB();
-  return new Promise((res, rej) => {
-    const req = db.transaction(DB_STORE).objectStore(DB_STORE).getAll();
-    req.onsuccess = () => res((req.result || []).sort((a, b) => b.id - a.id));
-    req.onerror   = () => rej(req.error);
-  });
-}
-async function dbDelete(id) {
-  const db = await openDB();
-  return new Promise((res, rej) => {
-    const tx = db.transaction(DB_STORE, "readwrite");
-    tx.objectStore(DB_STORE).delete(id);
-    tx.oncomplete = res;
-    tx.onerror    = () => rej(tx.error);
-  });
 }
 
 // ── File parsing ──────────────────────────────────────────────
@@ -136,139 +96,158 @@ function TimerSheet({ tMin, setTMin, tSec, setTSec, noLimit, setNoLimit, onConfi
   );
 }
 
-// ── Replay modal ──────────────────────────────────────────────
-function ReplayModal({ rec, onClose, onDownload }) {
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.97)", zIndex: 200,
-                  display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                  padding: "24px 20px", paddingTop: "max(24px, calc(env(safe-area-inset-top) + 12px))",
-                  paddingBottom: "max(24px, calc(env(safe-area-inset-bottom) + 12px))" }}>
-      <video src={rec.url} controls autoPlay playsInline
-             style={{ width: "100%", maxHeight: "62vh", borderRadius: 12, background: "#111", objectFit: "contain" }} />
-      <div style={{ marginTop: 14, textAlign: "center" }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: "#f0ede8" }}>{rec.scriptTitle}</div>
-        <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>{rec.label} · {fmt(rec.duration)}</div>
-      </div>
-      <div style={{ display: "flex", gap: 10, marginTop: 20, width: "100%" }}>
-        <button onClick={onDownload}
-          style={{ flex: 1, background: GOLD, color: "#000", border: "none", borderRadius: 12,
-                   padding: "13px 0", fontSize: 15, fontWeight: 700, cursor: "pointer" }}>
-          ↓ Download
-        </button>
-        <button onClick={onClose}
-          style={{ flex: 1, background: "rgba(255,255,255,.07)", color: "#f0ede8",
-                   border: "1px solid #2a2a2a", borderRadius: 12, padding: "13px 0",
-                   fontSize: 15, cursor: "pointer" }}>
-          Close
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ── Main ──────────────────────────────────────────────────────
 export default function PrompterX() {
-  // ── existing state ────────────────────────────────────────────
-  const [screen, setScreen]             = useState("home");
-  const [scripts, setScripts]           = useState([{ title: "Sample", text: SAMPLE }]);
-  const [editIdx, setEditIdx]           = useState(null);
-  const [scriptText, setScriptText]     = useState(SAMPLE);
-  const [title, setTitle]               = useState("Sample");
-  const [playing, setPlaying]           = useState(false);
-  const [speed, setSpeed]               = useState(1.0);
-  const [fontSize, setFontSize]         = useState(24);
-  const [progress, setProgress]         = useState(0);
-  const [elapsed, setElapsed]           = useState(0);
-  const [targetSec, setTargetSec]       = useState(0);
-  const [tMin, setTMin]                 = useState(5);
-  const [tSec, setTSec]                 = useState(0);
-  const [noLimit, setNoLimit]           = useState(true);
-  const [showTimer, setShowTimer]       = useState(false);
-  const [showRunTimer, setShowRunTimer] = useState(false);
-  const [uploadMsg, setUploadMsg]       = useState("");
-  // recording
-  const [recordings, setRecordings]     = useState([]);
-  const [isRecording, setIsRecording]   = useState(false);
-  const [recElapsed, setRecElapsed]     = useState(0);
-  const [replayRec, setReplayRec]       = useState(null);
-  const [recError, setRecError]         = useState("");
+  // ── state ─────────────────────────────────────────────────────
+  const [screen, setScreen]                     = useState("home");
+  const [scripts, setScripts]                   = useState([{ title: "Sample", text: SAMPLE }]);
+  const [editIdx, setEditIdx]                   = useState(null);
+  const [scriptText, setScriptText]             = useState(SAMPLE);
+  const [title, setTitle]                       = useState("Sample");
+  const [playing, setPlaying]                   = useState(false);
+  const [speed, setSpeed]                       = useState(1.0);
+  const [fontSize, setFontSize]                 = useState(24);
+  const [progress, setProgress]                 = useState(0);
+  const [elapsed, setElapsed]                   = useState(0);
+  const [targetSec, setTargetSec]               = useState(0);
+  const [tMin, setTMin]                         = useState(5);
+  const [tSec, setTSec]                         = useState(0);
+  const [noLimit, setNoLimit]                   = useState(true);
+  const [showTimer, setShowTimer]               = useState(false);
+  const [showRunTimer, setShowRunTimer]         = useState(false);
+  const [uploadMsg, setUploadMsg]               = useState("");
+  // recording — global setting, not per-run action
+  const [recordingEnabled, setRecordingEnabled] = useState(false);
+  const [isRecording, setIsRecording]           = useState(false);
+  const [recToast, setRecToast]                 = useState("");
   // AI upload
-  const [aiUploading, setAiUploading]   = useState(false);
-  const [aiUploadMsg, setAiUploadMsg]   = useState("");
-  const [aiToast, setAiToast]           = useState("");
-  const [dotStr, setDotStr]             = useState("");
+  const [aiUploading, setAiUploading]           = useState(false);
+  const [aiUploadMsg, setAiUploadMsg]           = useState("");
+  const [aiToast, setAiToast]                   = useState("");
+  const [dotStr, setDotStr]                     = useState("");
   // AI run
-  const [runSegments, setRunSegments]   = useState([]);
-  const [currentSeg, setCurrentSeg]     = useState(0);
+  const [runSegments, setRunSegments]           = useState([]);
+  const [currentSeg, setCurrentSeg]             = useState(0);
 
-  // ── existing refs ─────────────────────────────────────────────
-  const scrollRef        = useRef(null);
-  const playingRef       = useRef(false);
-  const scrollYRef       = useRef(0);
-  const maxYRef          = useRef(0);
-  const speedRef         = useRef(1.0);
-  const fsRef            = useRef(24);
-  const rafRef           = useRef(null);
-  const lastTRef         = useRef(null);
-  const tBaseRef         = useRef(null);
-  const tIntRef          = useRef(null);
-  const touchRef         = useRef({ x: 0, y: 0, start: 0, down: false, lastTap: 0 });
-  const mediaRecRef      = useRef(null);
-  const chunksRef        = useRef([]);
-  const streamRef        = useRef(null);
-  const recStartRef      = useRef(null);
-  const recIntRef        = useRef(null);
-  const replayUrlRef     = useRef(null);
-  const titleRef         = useRef(title);
-  const scriptsReadyRef  = useRef(false);
+  // ── refs ──────────────────────────────────────────────────────
+  const scrollRef           = useRef(null);
+  const playingRef          = useRef(false);
+  const scrollYRef          = useRef(0);
+  const maxYRef             = useRef(0);
+  const speedRef            = useRef(1.0);
+  const fsRef               = useRef(24);
+  const rafRef              = useRef(null);
+  const lastTRef            = useRef(null);
+  const tBaseRef            = useRef(null);
+  const tIntRef             = useRef(null);
+  const touchRef            = useRef({ x: 0, y: 0, start: 0, down: false, lastTap: 0 });
+  // recording refs
+  const mediaRecorderRef    = useRef(null);
+  const recordedChunksRef   = useRef([]);
+  const mediaStreamRef      = useRef(null);
+  const recordingEnabledRef = useRef(false); // mirror for use in callbacks
+  const isRecordingRef      = useRef(false);  // mirror for use in callbacks
+  const titleRef            = useRef(title);
+  const scriptsReadyRef     = useRef(false);
   // AI scroll refs
-  const aiFormattedRef   = useRef(false);
-  const segmentsRef      = useRef([]);
-  const currentSegRef    = useRef(0);
-  const actualSpeedRef   = useRef(1.0);
-  const pauseStateRef    = useRef("idle"); // idle | decelerating | holding | resuming
-  const pauseFrameRef    = useRef(0);
-  const pauseSegRef      = useRef(-1);
-  const preDecelSpeedRef = useRef(1.0);
+  const aiFormattedRef      = useRef(false);
+  const segmentsRef         = useRef([]);
+  const currentSegRef       = useRef(0);
+  const actualSpeedRef      = useRef(1.0);
+  const pauseStateRef       = useRef("idle");
+  const pauseFrameRef       = useRef(0);
+  const pauseSegRef         = useRef(-1);
+  const preDecelSpeedRef    = useRef(1.0);
 
   // ── effects ───────────────────────────────────────────────────
   useEffect(() => { titleRef.current = title; }, [title]);
+  useEffect(() => { recordingEnabledRef.current = recordingEnabled; }, [recordingEnabled]);
+  useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
 
-  // dots animation for AI upload card
   useEffect(() => {
     if (!aiUploading) { setDotStr(""); return; }
     const id = setInterval(() => setDotStr(d => d.length >= 3 ? "" : d + "."), 500);
     return () => clearInterval(id);
   }, [aiUploading]);
 
-  // diagnostic — log when runSegments changes
   useEffect(() => {
-    console.log("[PrompterX] runSegments updated", { count: runSegments.length, aiFormattedRef: aiFormattedRef.current, first3: runSegments.slice(0, 3) });
+    console.log("[PrompterX] runSegments updated", { count: runSegments.length, first3: runSegments.slice(0, 3) });
   }, [runSegments]);
 
-  // auto-dismiss AI toast after 5 s
   useEffect(() => {
     if (!aiToast) return;
     const id = setTimeout(() => setAiToast(""), 5000);
     return () => clearTimeout(id);
   }, [aiToast]);
 
-  // persist scripts — gated until after initial load
+  useEffect(() => {
+    if (!recToast) return;
+    const id = setTimeout(() => setRecToast(""), 5000);
+    return () => clearTimeout(id);
+  }, [recToast]);
+
   useEffect(() => {
     if (scriptsReadyRef.current) lsSaveScripts(scripts);
   }, [scripts]);
 
-  // load scripts + recordings on mount
   useEffect(() => {
     const saved = lsLoadScripts();
     if (saved !== null) setScripts(saved);
     scriptsReadyRef.current = true;
-    dbLoad().then(setRecordings).catch(() => {});
-    return () => {
-      stopRecNow();
-      if (replayUrlRef.current) URL.revokeObjectURL(replayUrlRef.current);
-    };
+    return () => { stopRecording(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── recording ─────────────────────────────────────────────────
+  function saveRecording(mimeType) {
+    const chunks = recordedChunksRef.current;
+    if (!chunks.length) return;
+    const ext  = (mimeType || "").includes("mp4") ? "mp4" : "webm";
+    const blob = new Blob(chunks, { type: mimeType || "video/webm" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href = url; a.download = `prompterx-${Date.now()}.${ext}`; a.click();
+    URL.revokeObjectURL(url);
+    recordedChunksRef.current = [];
+  }
+
+  async function startRecording() {
+    if (!recordingEnabledRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+      mediaStreamRef.current    = stream;
+      recordedChunksRef.current = [];
+      const mimeType =
+        MediaRecorder.isTypeSupported("video/mp4")             ? "video/mp4" :
+        MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" :
+        MediaRecorder.isTypeSupported("video/webm")            ? "video/webm" : "";
+      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      mr.ondataavailable = e => { if (e.data.size > 0) recordedChunksRef.current.push(e.data); };
+      mr.onstop = () => saveRecording(mr.mimeType || mimeType);
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setIsRecording(true);
+      isRecordingRef.current = true;
+    } catch {
+      setRecordingEnabled(false);
+      recordingEnabledRef.current = false;
+      setRecToast("Camera/mic access denied — recording disabled");
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      try { mediaRecorderRef.current.stop(); } catch {}
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+    setIsRecording(false);
+    isRecordingRef.current = false;
+  }
 
   // ── scroll engine ─────────────────────────────────────────────
   const measure = useCallback(() => {
@@ -288,11 +267,10 @@ export default function PrompterX() {
 
     if (aiFormattedRef.current && segmentsRef.current.length > 0) {
       // ── AI-aware scroll engine ───────────────────────────────
-      const segs      = segmentsRef.current;
-      const focusY    = sc.clientHeight * 0.33;
-      const cTop      = sc.getBoundingClientRect().top;
+      const segs   = segmentsRef.current;
+      const focusY = sc.clientHeight * 0.33;
+      const cTop   = sc.getBoundingClientRect().top;
 
-      // Find which of the 3 adjacent segments is closest to the focus line
       const lo = Math.max(0, currentSegRef.current - 1);
       const hi = Math.min(segs.length - 1, currentSegRef.current + 1);
       let closestSeg = currentSegRef.current, closestDist = Infinity, closestRect = null;
@@ -304,7 +282,6 @@ export default function PrompterX() {
         if (dist < closestDist) { closestDist = dist; closestSeg = i; closestRect = r; }
       }
 
-      // Trigger pauseBefore state machine once per segment
       if (
         closestRect &&
         segs[closestSeg]?.pauseBefore &&
@@ -313,20 +290,18 @@ export default function PrompterX() {
       ) {
         const dist = closestRect.top - cTop - focusY;
         if (Math.abs(dist) < 30) {
-          pauseStateRef.current  = "decelerating";
-          pauseFrameRef.current  = 20;
+          pauseStateRef.current    = "decelerating";
+          pauseFrameRef.current    = 20;
           preDecelSpeedRef.current = Math.max(actualSpeedRef.current, 0.05);
-          pauseSegRef.current    = closestSeg;
+          pauseSegRef.current      = closestSeg;
         }
       }
 
-      // Update current segment (triggers HUD re-render)
       if (closestSeg !== currentSegRef.current) {
         currentSegRef.current = closestSeg;
         setCurrentSeg(closestSeg);
       }
 
-      // Compute increment via state machine
       let increment = 0;
       const ps = pauseStateRef.current;
       if (ps === "idle") {
@@ -348,20 +323,21 @@ export default function PrompterX() {
         increment = 0;
         if (pauseFrameRef.current <= 0) pauseStateRef.current = "resuming";
       } else {
-        // resuming → back to idle next frame; smooth ramp handled by idle branch
         pauseStateRef.current = "idle";
         increment = 0;
       }
 
       scrollYRef.current += increment;
     } else {
-      // ── plain scroll engine (unchanged) ──────────────────────
+      // ── plain scroll engine ───────────────────────────────────
       scrollYRef.current += speedRef.current * fsRef.current * 2.0 * dt / 1000;
     }
 
     if (scrollYRef.current >= maxYRef.current) {
       scrollYRef.current = maxYRef.current; sc.scrollTop = scrollYRef.current;
-      playingRef.current = false; setPlaying(false); setProg(); clearInterval(tIntRef.current); return;
+      playingRef.current = false; setPlaying(false); setProg(); clearInterval(tIntRef.current);
+      if (isRecordingRef.current) stopRecording();
+      return;
     }
     sc.scrollTop = scrollYRef.current; setProg(); rafRef.current = requestAnimationFrame(loop);
   }, [setProg]);
@@ -374,20 +350,20 @@ export default function PrompterX() {
     clearInterval(tIntRef.current);
     tIntRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - tBaseRef.current) / 1000)), 500);
     rafRef.current = requestAnimationFrame(loop);
-  }, [measure, loop]);
+    if (recordingEnabledRef.current && !isRecordingRef.current) startRecording();
+  }, [measure, loop]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doPause = useCallback(() => {
     playingRef.current = false; lastTRef.current = null;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setPlaying(false); clearInterval(tIntRef.current);
+    if (isRecordingRef.current) stopRecording();
   }, []);
 
-  // doRun now accepts optional segments + aiFormatted flag; plain scripts pass nothing
   const doRun = useCallback((text, ttl, segments, aiFormatted) => {
     const useAi = !!(aiFormatted && segments?.length);
     console.log("[PrompterX] doRun", { ttl, aiFormatted, typeof_segments: typeof segments, segCount: segments?.length, useAi, first3: segments?.slice(0, 3) });
     setScriptText(text); setTitle(ttl);
-    // AI scroll state
     segmentsRef.current    = useAi ? segments : [];
     aiFormattedRef.current = useAi;
     setRunSegments(useAi ? segments : []);
@@ -395,7 +371,6 @@ export default function PrompterX() {
     actualSpeedRef.current = 1.0;
     pauseStateRef.current  = "idle"; pauseFrameRef.current = 0;
     pauseSegRef.current    = -1;    preDecelSpeedRef.current = 1.0;
-    // scroll state
     scrollYRef.current = 0; maxYRef.current = 0; lastTRef.current = null;
     playingRef.current = false; tBaseRef.current = null;
     setPlaying(false); setProgress(0); setElapsed(0);
@@ -405,17 +380,20 @@ export default function PrompterX() {
 
   const doExit = useCallback(() => {
     doPause(); clearInterval(tIntRef.current);
-    stopRecNow();
-    setScreen("home");
+    if (isRecordingRef.current) {
+      stopRecording();
+      setTimeout(() => setScreen("home"), 400);
+    } else {
+      setScreen("home");
+    }
   }, [doPause]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doRestart = useCallback(() => {
     const was = playingRef.current; doPause();
     scrollYRef.current = 0; tBaseRef.current = null; setElapsed(0); setProgress(0);
-    // reset AI pause machine on restart
     pauseStateRef.current = "idle"; pauseFrameRef.current = 0;
-    pauseSegRef.current   = -1;     currentSegRef.current = 0;
-    actualSpeedRef.current = 1.0;   setCurrentSeg(0);
+    pauseSegRef.current   = -1;    currentSegRef.current = 0;
+    actualSpeedRef.current = 1.0;  setCurrentSeg(0);
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
     if (was) doPlay();
   }, [doPause, doPlay]);
@@ -425,7 +403,7 @@ export default function PrompterX() {
     setShowTimer(false); setShowRunTimer(false);
   }, [noLimit, tMin, tSec]);
 
-  // ── existing upload handler — NOT modified ────────────────────
+  // ── upload handler ────────────────────────────────────────────
   const handleFile = useCallback(async (e) => {
     const file = e.target.files && e.target.files[0]; if (!file) return;
     setUploadMsg("Reading…");
@@ -440,7 +418,7 @@ export default function PrompterX() {
     e.target.value = "";
   }, []);
 
-  // ── AI upload handler — completely separate ───────────────────
+  // ── AI upload handler ─────────────────────────────────────────
   const handleAiFile = useCallback(async (e) => {
     const file = e.target.files && e.target.files[0]; if (!file) return;
     e.target.value = "";
@@ -453,7 +431,6 @@ export default function PrompterX() {
 
     setAiUploading(true); setAiToast("");
 
-    // Parse file (same function, separate invocation)
     let text = "";
     try {
       text = (await parseFile(file)).trim();
@@ -501,12 +478,11 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
       clearTimeout(tid);
 
       if (!resp.ok) throw new Error("api:" + resp.status);
-      const data = await resp.json();
-      const raw  = data.content?.[0]?.text || "";
-      // strip any accidental markdown fences, then extract the JSON array
+      const data    = await resp.json();
+      const raw     = data.content?.[0]?.text || "";
       const stripped = raw.replace(/^```[\w]*\n?/m, "").replace(/\n?```$/m, "").trim();
-      const match    = stripped.match(/\[[\s\S]*\]/);
-      const parsed   = JSON.parse(match ? match[0] : stripped);
+      const match   = stripped.match(/\[[\s\S]*\]/);
+      const parsed  = JSON.parse(match ? match[0] : stripped);
       if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("empty");
       console.log("[PrompterX] AI segments returned", { count: parsed.length, allSegments: parsed });
       segments = parsed;
@@ -555,85 +531,6 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
     if (playingRef.current) { lastTRef.current = null; rafRef.current = requestAnimationFrame(loop); }
   }, [loop]);
 
-  // ── recording ─────────────────────────────────────────────────
-  function stopRecNow() {
-    clearInterval(recIntRef.current);
-    if (mediaRecRef.current && mediaRecRef.current.state !== "inactive") {
-      try { mediaRecRef.current.stop(); } catch {}
-    }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-    setIsRecording(false);
-  }
-
-  const startRec = useCallback(async () => {
-    setRecError("");
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setRecError("Camera/mic not available in this browser"); return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
-      streamRef.current = stream;
-      const mimeType = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
-        .find(t => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) || "";
-      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-      chunksRef.current = [];
-      mr.ondataavailable = e => { if (e.data?.size > 0) chunksRef.current.push(e.data); };
-      mr.onstop = async () => {
-        clearInterval(recIntRef.current);
-        const blob = new Blob(chunksRef.current, { type: mr.mimeType || "video/webm" });
-        const id   = Date.now();
-        const rec  = {
-          id, scriptTitle: titleRef.current, mimeType: mr.mimeType || "video/webm", blob,
-          duration: Math.round((Date.now() - recStartRef.current) / 1000), stamp: isoStamp(),
-          label: new Date(id).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }),
-        };
-        try { await dbSave(rec); } catch {}
-        setRecordings(rs => [rec, ...rs]);
-        if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-        setIsRecording(false); setRecElapsed(0);
-      };
-      recStartRef.current = Date.now();
-      mr.start(1000); mediaRecRef.current = mr;
-      setIsRecording(true); setRecElapsed(0);
-      clearInterval(recIntRef.current);
-      recIntRef.current = setInterval(() => setRecElapsed(Math.floor((Date.now() - recStartRef.current) / 1000)), 500);
-    } catch (err) {
-      setRecError(err.name === "NotAllowedError" ? "Camera/mic permission denied" : "Recording unavailable: " + (err.message || err));
-      if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-    }
-  }, []);
-
-  const stopRec = useCallback(() => {
-    clearInterval(recIntRef.current);
-    if (mediaRecRef.current && mediaRecRef.current.state !== "inactive") {
-      try { mediaRecRef.current.stop(); } catch {}
-    }
-  }, []);
-
-  const openReplay = useCallback((rec) => {
-    if (replayUrlRef.current) URL.revokeObjectURL(replayUrlRef.current);
-    replayUrlRef.current = URL.createObjectURL(rec.blob);
-    setReplayRec({ ...rec, url: replayUrlRef.current });
-  }, []);
-
-  const closeReplay = useCallback(() => {
-    if (replayUrlRef.current) { URL.revokeObjectURL(replayUrlRef.current); replayUrlRef.current = null; }
-    setReplayRec(null);
-  }, []);
-
-  const downloadRec = useCallback((rec) => {
-    const url = URL.createObjectURL(rec.blob);
-    const ext = (rec.mimeType || "").includes("mp4") ? "mp4" : "webm";
-    const a   = document.createElement("a");
-    a.href = url; a.download = `PrompterX_${rec.stamp}.${ext}`; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  }, []);
-
-  const deleteRec = useCallback(async (id) => {
-    try { await dbDelete(id); } catch {}
-    setRecordings(rs => rs.filter(r => r.id !== id));
-  }, []);
-
   // ── derived ───────────────────────────────────────────────────
   const remaining = targetSec > 0 ? Math.max(0, targetSec - elapsed) : null;
   const timerStr  = remaining !== null ? fmt(remaining) : fmt(elapsed);
@@ -649,7 +546,7 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
         PROMPTER<span style={{ opacity: .35 }}>X</span>
       </div>
 
-      {/* Scripts — with AI badge */}
+      {/* Scripts */}
       {scripts.length > 0 && <>
         <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555" }}>Scripts</div>
         {scripts.map((s, i) => (
@@ -682,42 +579,9 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
         ))}
       </>}
 
-      {/* Recordings — always visible */}
-      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Recordings</div>
-
-      {recordings.length === 0 ? (
-        <div style={{ background: "#161616", border: "1px dashed #2a2a2a", borderRadius: 14,
-                      padding: "18px 16px", display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ fontSize: 22, flexShrink: 0, opacity: .4 }}>🎬</div>
-          <div style={{ fontSize: 13, color: "#444" }}>No recordings yet — tap REC while running a script</div>
-        </div>
-      ) : recordings.map(rec => (
-        <div key={rec.id} style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
-                                   padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}
-               onClick={() => openReplay(rec)}>
-            <div style={{ fontSize: 22, flexShrink: 0 }}>🎬</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 600, color: "#f0ede8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rec.scriptTitle}</div>
-              <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{rec.label} · {fmt(rec.duration)}</div>
-            </div>
-            <div style={{ fontSize: 16, color: GOLD, flexShrink: 0 }}>▶</div>
-          </div>
-          <button onClick={() => downloadRec(rec)}
-            style={{ background: "rgba(245,166,35,.1)", border: "none", borderRadius: 8,
-                     width: 34, height: 34, color: GOLD, fontSize: 16, cursor: "pointer",
-                     display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>↓</button>
-          <button onClick={() => deleteRec(rec.id)}
-            style={{ background: "rgba(232,64,64,.1)", border: "none", borderRadius: 8,
-                     width: 34, height: 34, color: RED, fontSize: 15, cursor: "pointer",
-                     display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>🗑</button>
-        </div>
-      ))}
-
-      {/* Add script */}
+      {/* Add Script */}
       <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Add Script</div>
 
-      {/* Card 1 — plain upload, NOT modified */}
       <label style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
                       padding: "14px 16px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}>
         <div style={{ fontSize: 22, flexShrink: 0 }}>📎</div>
@@ -731,7 +595,6 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
         <input type="file" accept=".txt,.text,.md,.rtf,.doc,.docx,.pdf" onChange={handleFile} style={{ display: "none" }} />
       </label>
 
-      {/* Card 2 — AI upload, completely separate */}
       <label style={{ background: "#161616", border: `1px solid ${aiUploading ? "rgba(245,166,35,.4)" : "rgba(245,166,35,.2)"}`,
                       borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14,
                       cursor: aiUploading ? "not-allowed" : "pointer", opacity: aiUploading ? 0.85 : 1 }}>
@@ -758,8 +621,24 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
         <div style={{ fontSize: 18, color: "#444" }}>›</div>
       </div>
 
+      {/* Settings */}
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Settings</div>
+
+      {/* Recording toggle */}
+      <div style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
+                    padding: "14px 16px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}
+           onClick={() => setRecordingEnabled(v => !v)}>
+        <div style={{ fontSize: 18, flexShrink: 0, color: recordingEnabled ? RED : "#555" }}>⏺</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: "#f0ede8" }}>Record Session</div>
+          <div style={{ fontSize: 12, color: recordingEnabled ? RED : "#666", marginTop: 2 }}>
+            {recordingEnabled ? "On — will record when prompter runs" : "Off — tap to enable"}
+          </div>
+        </div>
+        <div style={{ fontSize: 18, color: "#444" }}>›</div>
+      </div>
+
       {/* Timer */}
-      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Timer</div>
       <div style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
                     padding: "14px 16px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}
            onClick={() => setShowTimer(true)}>
@@ -790,10 +669,6 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
           <button onClick={() => setAiToast("")}
             style={{ background: "none", border: "none", color: "#555", fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1, flexShrink: 0 }}>✕</button>
         </div>
-      )}
-
-      {replayRec && (
-        <ReplayModal rec={replayRec} onClose={closeReplay} onDownload={() => downloadRec(replayRec)} />
       )}
     </div>
   );
@@ -839,6 +714,9 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
     <div style={{ position: "fixed", inset: 0, background: "#000", overflow: "hidden", userSelect: "none" }}
          onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
 
+      {/* Pulse animation keyframe */}
+      <style>{`@keyframes recpulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
+
       {/* Scrollable content */}
       <div ref={scrollRef}
         style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
@@ -848,7 +726,6 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
                       whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "'Courier New',monospace" }}>
 
           {runSegments.length > 0 ? (
-            // ── AI segment renderer ───────────────────────────
             runSegments.map((seg, i) => {
               const isUrgent    = seg.tone === "urgent";
               const isEnergetic = seg.tone === "energetic";
@@ -883,7 +760,6 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
               );
             })
           ) : (
-            // ── plain renderer (unchanged) ────────────────────
             scriptText.split(/\n\n+/).filter(p => p.trim()).map((p, i) => (
               <p key={i} style={{ marginBottom: "1.3em" }}>{p.replace(/\n/g, " ")}</p>
             ))
@@ -896,16 +772,32 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
       <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "30%", background: "linear-gradient(to top,#000,transparent)", pointerEvents: "none", zIndex: 5 }} />
       <div style={{ position: "absolute", top: "33%", left: 0, right: 0, height: 2, background: `linear-gradient(90deg,transparent,${GOLD} 20%,${GOLD} 80%,transparent)`, boxShadow: `0 0 10px ${GOLD}`, opacity: .55, pointerEvents: "none", zIndex: 6 }} />
 
-      {/* Top HUD */}
+      {/* Top HUD — title | rec indicator | timer | badge */}
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 10,
                     paddingTop: "max(16px, calc(env(safe-area-inset-top) + 8px))",
                     background: "linear-gradient(to bottom,rgba(0,0,0,.9),transparent)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 18px 8px" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 2, opacity: .8, maxWidth: "28%",
-                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 18px 8px", gap: 8 }}>
+
+          {/* Title */}
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 2, opacity: .8, maxWidth: "30%",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>
             {title.toUpperCase()}
           </div>
 
+          {/* Recording indicator — passive, not interactive */}
+          <div style={{ display: "flex", alignItems: "center", gap: 4, width: 44, flexShrink: 0, pointerEvents: "none" }}>
+            <span style={{
+              fontSize: 14,
+              color: isRecording ? RED : recordingEnabled ? "rgba(232,64,64,0.4)" : "#333",
+              animation: isRecording ? "recpulse 1.2s infinite" : "none",
+            }}>⏺</span>
+            {isRecording && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: RED, letterSpacing: 1,
+                             animation: "recpulse 1.2s infinite" }}>REC</span>
+            )}
+          </div>
+
+          {/* Timer */}
           <button onClick={() => setShowRunTimer(true)}
             style={{ fontSize: 20, fontWeight: 900, letterSpacing: 2, background: "none", border: "none",
                      cursor: "pointer", padding: 0, fontFamily: "sans-serif",
@@ -913,26 +805,14 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
             {timerStr}
           </button>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <button onClick={isRecording ? stopRec : startRec}
-              style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 9px",
-                       borderRadius: 8, border: `1px solid ${isRecording ? RED : "rgba(232,64,64,.4)"}`,
-                       background: isRecording ? "rgba(232,64,64,.2)" : "transparent", cursor: "pointer" }}>
-              <span style={{ width: isRecording ? 8 : 10, height: isRecording ? 8 : 10,
-                             borderRadius: isRecording ? 2 : "50%",
-                             background: RED, display: "block", flexShrink: 0 }} />
-              <span style={{ fontSize: 11, fontWeight: 700, color: isRecording ? RED : "rgba(232,64,64,.7)", letterSpacing: 1 }}>
-                {isRecording ? fmt(recElapsed) : "REC"}
-              </span>
-            </button>
-            <div style={{ fontSize: 11, fontWeight: 700, padding: "5px 9px", borderRadius: 6, letterSpacing: 1,
-                          background: playing ? RED : GOLD, color: playing ? "#fff" : "#000" }}>
-              {playing ? "LIVE" : "READY"}
-            </div>
+          {/* LIVE / READY badge */}
+          <div style={{ fontSize: 11, fontWeight: 700, padding: "5px 9px", borderRadius: 6, letterSpacing: 1,
+                        background: playing ? RED : GOLD, color: playing ? "#fff" : "#000", flexShrink: 0 }}>
+            {playing ? "LIVE" : "READY"}
           </div>
         </div>
 
-        {/* AI segment indicator — only for AI scripts */}
+        {/* AI segment indicator */}
         {curSegObj && (
           <div style={{ textAlign: "center", paddingBottom: 8 }}>
             <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase",
@@ -944,13 +824,13 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
         )}
       </div>
 
-      {/* rec error toast */}
-      {recError && (
+      {/* rec toast (permission denied, etc.) */}
+      {recToast && (
         <div style={{ position: "absolute", top: 70, left: 16, right: 16, background: "rgba(232,64,64,.9)",
                       borderRadius: 10, padding: "10px 14px", fontSize: 13, color: "#fff", zIndex: 20,
                       display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          {recError}
-          <button onClick={() => setRecError("")} style={{ background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1 }}>✕</button>
+          {recToast}
+          <button onClick={() => setRecToast("")} style={{ background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1 }}>✕</button>
         </div>
       )}
 
@@ -991,7 +871,7 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
         </div>
       </div>
 
-      {/* AI debug overlay — shows segment tracking live */}
+      {/* AI debug overlay */}
       {runSegments.length > 0 && (
         <div style={{ position: "absolute", bottom: 0, left: 16, zIndex: 99,
                       paddingBottom: "max(110px, calc(env(safe-area-inset-bottom) + 100px))" }}>
