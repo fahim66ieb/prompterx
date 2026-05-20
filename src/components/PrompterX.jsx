@@ -23,10 +23,18 @@ const TONE_COLOR = { urgent: RED, energetic: GOLD, serious: "#aaa", warm: "#f0a0
 // ── localStorage (scripts) ────────────────────────────────────
 const LS_SCRIPTS = "prompterx-scripts";
 function lsLoadScripts() {
-  try { const s = localStorage.getItem(LS_SCRIPTS); return s !== null ? JSON.parse(s) : null; } catch { return null; }
+  try {
+    const s = localStorage.getItem(LS_SCRIPTS);
+    const result = s !== null ? JSON.parse(s) : null;
+    console.log("[PrompterX] lsLoad:", JSON.stringify(result?.map(x => ({ title: x.title, ai: x.aiFormatted, segs: x.segments?.length ?? 0 }))));
+    return result;
+  } catch { return null; }
 }
 function lsSaveScripts(scripts) {
-  try { localStorage.setItem(LS_SCRIPTS, JSON.stringify(scripts)); } catch {}
+  try {
+    localStorage.setItem(LS_SCRIPTS, JSON.stringify(scripts));
+    console.log("[PrompterX] lsSave:", JSON.stringify(scripts.map(x => ({ title: x.title, ai: x.aiFormatted, segs: x.segments?.length ?? 0 }))));
+  } catch (e) { console.error("[PrompterX] lsSave FAILED:", e.message); }
 }
 
 // ── File parsing ──────────────────────────────────────────────
@@ -567,8 +575,12 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
                   {s.text.trim().split(/\s+/).filter(Boolean).length} words
                   {s.aiFormatted && (
                     <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.5, padding: "1px 5px",
-                                   background: "rgba(245,166,35,.12)", color: GOLD,
-                                   border: "1px solid rgba(245,166,35,.3)", borderRadius: 4 }}>✦ AI</span>
+                                   background: Array.isArray(s.segments) && s.segments.length > 0 ? "rgba(245,166,35,.12)" : "rgba(232,64,64,.12)",
+                                   color: Array.isArray(s.segments) && s.segments.length > 0 ? GOLD : RED,
+                                   border: `1px solid ${Array.isArray(s.segments) && s.segments.length > 0 ? "rgba(245,166,35,.3)" : "rgba(232,64,64,.3)"}`,
+                                   borderRadius: 4 }}>
+                      {Array.isArray(s.segments) && s.segments.length > 0 ? `✦ AI · ${s.segments.length} segs` : "✦ AI · no segs"}
+                    </span>
                   )}
                 </div>
               </div>
@@ -691,6 +703,7 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
       const orig      = editIdx !== null ? scripts[editIdx] : null;
       const textSame  = orig && orig.text === scriptText;
       const keepAi    = textSame && orig.aiFormatted === true && Array.isArray(orig.segments) && orig.segments.length > 0;
+      console.log("[PrompterX] saveAndRun:", JSON.stringify({ editIdx, origAi: orig?.aiFormatted, origSegs: orig?.segments?.length ?? 0, textSame, keepAi }));
       const entry     = keepAi
         ? { title: title || "Untitled", text: scriptText, aiFormatted: true, segments: orig.segments }
         : { title: title || "Untitled", text: scriptText };
