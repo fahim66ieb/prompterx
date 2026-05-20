@@ -464,6 +464,38 @@ export default function PrompterX() {
         ))}
       </>}
 
+      {/* Recordings — always visible */}
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Recordings</div>
+
+      {recordings.length === 0 ? (
+        <div style={{ background: "#161616", border: "1px dashed #2a2a2a", borderRadius: 14,
+                      padding: "18px 16px", display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ fontSize: 22, flexShrink: 0, opacity: .4 }}>🎬</div>
+          <div style={{ fontSize: 13, color: "#444" }}>No recordings yet — tap REC while running a script</div>
+        </div>
+      ) : recordings.map(rec => (
+        <div key={rec.id} style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
+                                   padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}
+               onClick={() => openReplay(rec)}>
+            <div style={{ fontSize: 22, flexShrink: 0 }}>🎬</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#f0ede8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rec.scriptTitle}</div>
+              <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{rec.label} · {fmt(rec.duration)}</div>
+            </div>
+            <div style={{ fontSize: 16, color: GOLD, flexShrink: 0 }}>▶</div>
+          </div>
+          <button onClick={() => downloadRec(rec)}
+            style={{ background: "rgba(245,166,35,.1)", border: "none", borderRadius: 8,
+                     width: 34, height: 34, color: GOLD, fontSize: 16, cursor: "pointer",
+                     display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>↓</button>
+          <button onClick={() => deleteRec(rec.id)}
+            style={{ background: "rgba(232,64,64,.1)", border: "none", borderRadius: 8,
+                       width: 34, height: 34, color: RED, fontSize: 15, cursor: "pointer",
+                       display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>🗑</button>
+          </div>
+        ))}
+
       {/* Add script */}
       <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Add Script</div>
 
@@ -505,33 +537,6 @@ export default function PrompterX() {
         </div>
         <div style={{ fontSize: 18, color: "#444" }}>›</div>
       </div>
-
-      {/* Recordings */}
-      {recordings.length > 0 && <>
-        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Recordings</div>
-        {recordings.map(rec => (
-          <div key={rec.id} style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
-                                     padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}
-                 onClick={() => openReplay(rec)}>
-              <div style={{ fontSize: 22, flexShrink: 0 }}>🎬</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 600, color: "#f0ede8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rec.scriptTitle}</div>
-                <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{rec.label} · {fmt(rec.duration)}</div>
-              </div>
-              <div style={{ fontSize: 16, color: GOLD, flexShrink: 0 }}>▶</div>
-            </div>
-            <button onClick={() => downloadRec(rec)}
-              style={{ background: "rgba(245,166,35,.1)", border: "none", borderRadius: 8,
-                       width: 34, height: 34, color: GOLD, fontSize: 16, cursor: "pointer",
-                       display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>↓</button>
-            <button onClick={() => deleteRec(rec.id)}
-              style={{ background: "rgba(232,64,64,.1)", border: "none", borderRadius: 8,
-                       width: 34, height: 34, color: RED, fontSize: 15, cursor: "pointer",
-                       display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>🗑</button>
-          </div>
-        ))}
-      </>}
 
       {showTimer && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 50, display: "flex", alignItems: "flex-end" }}
