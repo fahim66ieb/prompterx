@@ -687,12 +687,18 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
     const wc = scriptText.trim().split(/\s+/).filter(Boolean).length;
     const saveAndRun = () => {
       if (!scriptText.trim()) return;
-      const entry = { title: title || "Untitled", text: scriptText };
+      // Preserve AI metadata if text was not changed
+      const orig      = editIdx !== null ? scripts[editIdx] : null;
+      const textSame  = orig && orig.text === scriptText;
+      const keepAi    = textSame && orig.aiFormatted === true && Array.isArray(orig.segments) && orig.segments.length > 0;
+      const entry     = keepAi
+        ? { title: title || "Untitled", text: scriptText, aiFormatted: true, segments: orig.segments }
+        : { title: title || "Untitled", text: scriptText };
       setScripts(ss => {
         if (editIdx !== null) { const n = [...ss]; n[editIdx] = entry; return n; }
         return [entry, ...ss];
       });
-      doRun(scriptText, title || "Untitled");
+      doRun(scriptText, title || "Untitled", keepAi ? orig.segments : undefined, keepAi || undefined);
     };
     return (
       <div style={{ minHeight: "100vh", background: "#0a0a0a", color: "#f0ede8", fontFamily: "sans-serif",
