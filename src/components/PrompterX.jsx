@@ -19,7 +19,7 @@ const isoStamp = () => new Date().toISOString().replace("T", "_").replace(/[:.]/
 
 // AI scroll constants
 const SPEED_MAP  = { slow: 0.55, normal: 1.0, fast: 1.55 };
-const TONE_COLOR = { urgent: RED, energetic: GOLD, serious: "#aaa", warm: "#ff00aa", calm: "rgba(255,255,255,0.4)" };
+const TONE_COLOR = { urgent: RED, energetic: GOLD, serious: "#aaa", warm: "#f0a060", calm: "rgba(255,255,255,0.4)" };
 
 // ── localStorage (scripts) ────────────────────────────────────
 const LS_SCRIPTS = "prompterx-scripts";
@@ -241,6 +241,11 @@ export default function PrompterX() {
     return () => clearInterval(id);
   }, [aiUploading]);
 
+  // diagnostic — log when runSegments changes
+  useEffect(() => {
+    console.log("[PrompterX] runSegments updated", { count: runSegments.length, aiFormattedRef: aiFormattedRef.current, first3: runSegments.slice(0, 3) });
+  }, [runSegments]);
+
   // auto-dismiss AI toast after 5 s
   useEffect(() => {
     if (!aiToast) return;
@@ -380,6 +385,7 @@ export default function PrompterX() {
   // doRun now accepts optional segments + aiFormatted flag; plain scripts pass nothing
   const doRun = useCallback((text, ttl, segments, aiFormatted) => {
     const useAi = !!(aiFormatted && segments?.length);
+    console.log("[PrompterX] doRun", { ttl, aiFormatted, typeof_segments: typeof segments, segCount: segments?.length, useAi, first3: segments?.slice(0, 3) });
     setScriptText(text); setTitle(ttl);
     // AI scroll state
     segmentsRef.current    = useAi ? segments : [];
@@ -475,24 +481,20 @@ export default function PrompterX() {
           "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           max_tokens: 4096,
+          system: `You are a professional speech coach preparing a teleprompter script for delivery.
+Analyze the script and break it into individual sentences or very short phrases (max 15 words each).
+For each segment you MUST vary the tags meaningfully — do not return the same values for every segment.
+Use strong emphasis and slow speed for: key facts, statistics, names, calls to action, conclusions.
+Use fast speed and no emphasis for: transitional phrases, filler, lists of items.
+Use pauseBefore true for: opening lines, major topic shifts, emotional beats, conclusions.
+Return ONLY a raw JSON array with no markdown, no explanation, no code fences.
+Each element must have exactly these keys: text, speed, emphasis, pauseBefore, pauseAfter, tone.
+Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseBefore: true|false, pauseAfter: true|false, tone: calm|energetic|serious|warm|urgent`,
           messages: [{
             role: "user",
-            content:
-`Break this teleprompter script into individual sentences or short phrases. Return a JSON array ONLY — no markdown, no explanation, no code fences. Each element must be exactly:
-{"text":"...","speed":"slow|normal|fast","emphasis":"none|moderate|strong","pauseBefore":true|false,"pauseAfter":true|false,"tone":"calm|energetic|serious|warm|urgent"}
-
-Tagging rules:
-- Key messages, statistics, names, calls to action → slow + strong emphasis
-- Transitions and connective phrases → fast + none
-- Opening and closing lines → slow + pauseBefore and pauseAfter true
-- Emotional or persuasive beats → slow + strong + pauseBefore true
-- Never more than 3 consecutive segments at the same speed
-- Lists and enumerations → normal or fast
-
-Script:
-${text}`,
+            content: `Break this script into segments with varied delivery tags:\n\n${text}`,
           }],
         }),
       });
@@ -506,6 +508,7 @@ ${text}`,
       const match    = stripped.match(/\[[\s\S]*\]/);
       const parsed   = JSON.parse(match ? match[0] : stripped);
       if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("empty");
+      console.log("[PrompterX] AI segments returned", { count: parsed.length, allSegments: parsed });
       segments = parsed;
     } catch (err) {
       if (err.name === "AbortError")          toast = "AI formatting timed out — saved as plain script";
@@ -850,6 +853,7 @@ ${text}`,
               const isUrgent    = seg.tone === "urgent";
               const isEnergetic = seg.tone === "energetic";
               const isSerious   = seg.tone === "serious";
+              const isWarm      = seg.tone === "warm";
               return (
                 <div key={i}>
                   {seg.pauseBefore && (
@@ -858,6 +862,7 @@ ${text}`,
                   <p
                     data-seg={i}
                     style={{
+                      margin: 0,
                       marginTop:    seg.pauseBefore ? "2em"  : "0.5em",
                       marginBottom: seg.pauseAfter  ? "2em"  : "0.5em",
                       fontWeight:   seg.emphasis === "strong" ? 900 : seg.emphasis === "moderate" ? 700 : 400,
@@ -867,7 +872,8 @@ ${text}`,
                       fontSize:     seg.speed === "slow" ? "1.08em" : seg.speed === "fast" ? "0.94em" : "1em",
                       ...(isUrgent    ? { borderLeft: "3px solid #e84040", paddingLeft: "12px" } :
                           isEnergetic ? { borderLeft: "3px solid #f5a623", paddingLeft: "12px" } :
-                          isSerious   ? { borderLeft: "3px solid #666",    paddingLeft: "12px" } : {}),
+                          isSerious   ? { borderLeft: "3px solid #666",    paddingLeft: "12px" } :
+                          isWarm      ? { borderLeft: "3px solid #f0a060", paddingLeft: "12px" } : {}),
                       lineHeight: 1.8,
                     }}
                   >
@@ -984,6 +990,18 @@ ${text}`,
             style={{ width: 44, height: 44, borderRadius: 10, background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.12)", color: "#fff", fontSize: 18, cursor: "pointer" }}>✕</button>
         </div>
       </div>
+
+      {/* AI debug overlay — shows segment tracking live */}
+      {runSegments.length > 0 && (
+        <div style={{ position: "absolute", bottom: 0, left: 16, zIndex: 99,
+                      paddingBottom: "max(110px, calc(env(safe-area-inset-bottom) + 100px))" }}>
+          <div style={{ background: "rgba(0,0,0,0.88)", border: `1px solid ${GOLD}`,
+                        borderRadius: 8, padding: "4px 10px", fontSize: 10,
+                        fontWeight: 700, color: GOLD, letterSpacing: 0.5, whiteSpace: "nowrap" }}>
+            AI MODE · seg {currentSeg + 1}/{runSegments.length} · {curSegObj?.speed} · {curSegObj?.tone}
+          </div>
+        </div>
+      )}
 
       {showRunTimer && (
         <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 50, display: "flex", alignItems: "flex-end" }}
