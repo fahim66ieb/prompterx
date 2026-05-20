@@ -190,7 +190,7 @@ export default function PrompterX() {
 
   useEffect(() => {
     if (!aiToast) return;
-    const id = setTimeout(() => setAiToast(""), 5000);
+    const id = setTimeout(() => setAiToast(""), 10000);
     return () => clearTimeout(id);
   }, [aiToast]);
 
@@ -472,7 +472,7 @@ export default function PrompterX() {
           "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
+          model: "claude-sonnet-4-20250514",
           max_tokens: 4096,
           system: `You are a professional speech coach preparing a teleprompter script for delivery.
 Analyze the script and break it into individual sentences or very short phrases (max 15 words each).
@@ -491,7 +491,11 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
       });
       clearTimeout(tid);
 
-      if (!resp.ok) throw new Error("api:" + resp.status);
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        console.error("[PrompterX] API error", resp.status, JSON.stringify(errBody));
+        throw new Error("api:" + resp.status);
+      }
       const data    = await resp.json();
       const raw     = data.content?.[0]?.text || "";
       const stripped = raw.replace(/^```[\w]*\n?/m, "").replace(/\n?```$/m, "").trim();
@@ -501,12 +505,13 @@ Valid values — speed: slow|normal|fast, emphasis: none|moderate|strong, pauseB
       console.log("[PrompterX] AI segments returned", { count: parsed.length, allSegments: parsed });
       segments = parsed;
     } catch (err) {
-      if (err.name === "AbortError")          toast = "AI formatting timed out — saved as plain script";
+      console.error("[PrompterX] AI upload error:", err.name, err.message);
+      if (err.name === "AbortError")           toast = "AI formatting timed out — saved as plain script";
       else if (err.message === "empty")        toast = "AI returned no segments — saved as plain script";
-      else if (err instanceof SyntaxError)     toast = "AI returned unexpected format — saved as plain script";
-      else if (err.message?.startsWith("api:") || err.name === "TypeError")
-                                               toast = "AI unavailable — saved as plain script";
-      else                                     toast = "AI formatting unavailable — saved as plain script";
+      else if (err instanceof SyntaxError)     toast = "AI returned invalid JSON — saved as plain script";
+      else if (err.message?.startsWith("api:")) toast = `AI API error ${err.message.slice(4)} — check NEXT_PUBLIC_ANTHROPIC_API_KEY in Vercel settings`;
+      else if (err.name === "TypeError")       toast = "AI network error — saved as plain script";
+      else                                     toast = `AI error: ${err.message} — saved as plain script`;
     }
 
     const entry = segments
