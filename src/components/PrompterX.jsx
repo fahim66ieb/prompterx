@@ -17,6 +17,15 @@ const RED  = "#e84040";
 const fmt  = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 const isoStamp = () => new Date().toISOString().replace("T", "_").replace(/[:.]/g, "-").slice(0, 19);
 
+// ── localStorage (scripts) ────────────────────────────────────
+const LS_SCRIPTS = "prompterx-scripts";
+function lsLoadScripts() {
+  try { const s = localStorage.getItem(LS_SCRIPTS); return s !== null ? JSON.parse(s) : null; } catch { return null; }
+}
+function lsSaveScripts(scripts) {
+  try { localStorage.setItem(LS_SCRIPTS, JSON.stringify(scripts)); } catch {}
+}
+
 // ── IndexedDB ─────────────────────────────────────────────────
 const DB_NAME  = "prompterx-recs";
 const DB_STORE = "recs";
@@ -201,8 +210,13 @@ export default function PrompterX() {
 
   useEffect(() => { titleRef.current = title; }, [title]);
 
-  // load recordings from IndexedDB on mount
+  // persist scripts to localStorage
+  useEffect(() => { lsSaveScripts(scripts); }, [scripts]);
+
+  // load scripts + recordings on mount
   useEffect(() => {
+    const saved = lsLoadScripts();
+    if (saved !== null) setScripts(saved);
     dbLoad().then(setRecordings).catch(() => {});
     return () => {
       stopRecNow();
@@ -283,12 +297,9 @@ export default function PrompterX() {
       const text = (await parseFile(file)).trim();
       if (!text) { setUploadMsg("No text found"); return; }
       const ttl = file.name.replace(/\.[^.]+$/, "");
-      setTitle(ttl); setScriptText(text);
       setScripts(ss => [{ title: ttl, text }, ...ss.filter(s => s.title !== ttl)]);
-      setEditIdx(0);
       setUploadMsg("✓ " + file.name);
       setTimeout(() => setUploadMsg(""), 3000);
-      setScreen("edit");
     } catch (err) { setUploadMsg("Error: " + (err.message || err)); }
     e.target.value = "";
   }, []);
@@ -432,7 +443,7 @@ export default function PrompterX() {
         <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555" }}>Scripts</div>
         {scripts.map((s, i) => (
           <div key={i} style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
-                                padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                                padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}
                  onClick={() => { setTitle(s.title); setScriptText(s.text); setEditIdx(i); setScreen("edit"); }}>
               <div style={{ fontSize: 22, flexShrink: 0 }}>📜</div>
@@ -440,11 +451,14 @@ export default function PrompterX() {
                 <div style={{ fontSize: 15, fontWeight: 600, color: "#f0ede8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</div>
                 <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{s.text.trim().split(/\s+/).filter(Boolean).length} words</div>
               </div>
-              <div style={{ fontSize: 18, color: "#444" }}>›</div>
             </div>
+            <button onClick={() => doRun(s.text, s.title)}
+              style={{ background: "rgba(245,166,35,.15)", border: "1px solid rgba(245,166,35,.3)", borderRadius: 8,
+                       width: 34, height: 34, color: GOLD, fontSize: 16, cursor: "pointer",
+                       display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>▶</button>
             <button onClick={() => setScripts(ss => ss.filter((_, j) => j !== i))}
               style={{ background: "rgba(232,64,64,.1)", border: "none", borderRadius: 8,
-                       width: 32, height: 32, color: RED, fontSize: 15, cursor: "pointer",
+                       width: 34, height: 34, color: RED, fontSize: 15, cursor: "pointer",
                        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>🗑</button>
           </div>
         ))}
