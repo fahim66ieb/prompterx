@@ -17,6 +17,10 @@ const RED  = "#e84040";
 const fmt  = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 const isoStamp = () => new Date().toISOString().replace("T", "_").replace(/[:.]/g, "-").slice(0, 19);
 
+// AI scroll constants
+const SPEED_MAP  = { slow: 0.55, normal: 1.0, fast: 1.55 };
+const TONE_COLOR = { urgent: RED, energetic: GOLD, serious: "#aaa", warm: "#ff00aa", calm: "rgba(255,255,255,0.4)" };
+
 // ── localStorage (scripts) ────────────────────────────────────
 const LS_SCRIPTS = "prompterx-scripts";
 function lsLoadScripts() {
@@ -164,6 +168,7 @@ function ReplayModal({ rec, onClose, onDownload }) {
 
 // ── Main ──────────────────────────────────────────────────────
 export default function PrompterX() {
+  // ── existing state ────────────────────────────────────────────
   const [screen, setScreen]             = useState("home");
   const [scripts, setScripts]           = useState([{ title: "Sample", text: SAMPLE }]);
   const [editIdx, setEditIdx]           = useState(null);
@@ -187,31 +192,63 @@ export default function PrompterX() {
   const [recElapsed, setRecElapsed]     = useState(0);
   const [replayRec, setReplayRec]       = useState(null);
   const [recError, setRecError]         = useState("");
+  // AI upload
+  const [aiUploading, setAiUploading]   = useState(false);
+  const [aiUploadMsg, setAiUploadMsg]   = useState("");
+  const [aiToast, setAiToast]           = useState("");
+  const [dotStr, setDotStr]             = useState("");
+  // AI run
+  const [runSegments, setRunSegments]   = useState([]);
+  const [currentSeg, setCurrentSeg]     = useState(0);
 
-  const scrollRef    = useRef(null);
-  const playingRef   = useRef(false);
-  const scrollYRef   = useRef(0);
-  const maxYRef      = useRef(0);
-  const speedRef     = useRef(1.0);
-  const fsRef        = useRef(24);
-  const rafRef       = useRef(null);
-  const lastTRef     = useRef(null);
-  const tBaseRef     = useRef(null);
-  const tIntRef      = useRef(null);
-  const touchRef     = useRef({ x: 0, y: 0, start: 0, down: false, lastTap: 0 });
-  // recording refs
-  const mediaRecRef  = useRef(null);
-  const chunksRef    = useRef([]);
-  const streamRef    = useRef(null);
-  const recStartRef  = useRef(null);
-  const recIntRef    = useRef(null);
+  // ── existing refs ─────────────────────────────────────────────
+  const scrollRef        = useRef(null);
+  const playingRef       = useRef(false);
+  const scrollYRef       = useRef(0);
+  const maxYRef          = useRef(0);
+  const speedRef         = useRef(1.0);
+  const fsRef            = useRef(24);
+  const rafRef           = useRef(null);
+  const lastTRef         = useRef(null);
+  const tBaseRef         = useRef(null);
+  const tIntRef          = useRef(null);
+  const touchRef         = useRef({ x: 0, y: 0, start: 0, down: false, lastTap: 0 });
+  const mediaRecRef      = useRef(null);
+  const chunksRef        = useRef([]);
+  const streamRef        = useRef(null);
+  const recStartRef      = useRef(null);
+  const recIntRef        = useRef(null);
   const replayUrlRef     = useRef(null);
   const titleRef         = useRef(title);
-  const scriptsReadyRef  = useRef(false); // gate: don't save until after initial load
+  const scriptsReadyRef  = useRef(false);
+  // AI scroll refs
+  const aiFormattedRef   = useRef(false);
+  const segmentsRef      = useRef([]);
+  const currentSegRef    = useRef(0);
+  const actualSpeedRef   = useRef(1.0);
+  const pauseStateRef    = useRef("idle"); // idle | decelerating | holding | resuming
+  const pauseFrameRef    = useRef(0);
+  const pauseSegRef      = useRef(-1);
+  const preDecelSpeedRef = useRef(1.0);
 
+  // ── effects ───────────────────────────────────────────────────
   useEffect(() => { titleRef.current = title; }, [title]);
 
-  // persist scripts — only after initial load to avoid overwriting on mount
+  // dots animation for AI upload card
+  useEffect(() => {
+    if (!aiUploading) { setDotStr(""); return; }
+    const id = setInterval(() => setDotStr(d => d.length >= 3 ? "" : d + "."), 500);
+    return () => clearInterval(id);
+  }, [aiUploading]);
+
+  // auto-dismiss AI toast after 5 s
+  useEffect(() => {
+    if (!aiToast) return;
+    const id = setTimeout(() => setAiToast(""), 5000);
+    return () => clearTimeout(id);
+  }, [aiToast]);
+
+  // persist scripts — gated until after initial load
   useEffect(() => {
     if (scriptsReadyRef.current) lsSaveScripts(scripts);
   }, [scripts]);
@@ -242,8 +279,81 @@ export default function PrompterX() {
     if (!playingRef.current) return;
     if (lastTRef.current === null) { lastTRef.current = ts; rafRef.current = requestAnimationFrame(loop); return; }
     const dt = Math.min(ts - lastTRef.current, 100); lastTRef.current = ts;
-    scrollYRef.current += speedRef.current * fsRef.current * 2.0 * dt / 1000;
     const sc = scrollRef.current; if (!sc) return;
+
+    if (aiFormattedRef.current && segmentsRef.current.length > 0) {
+      // ── AI-aware scroll engine ───────────────────────────────
+      const segs      = segmentsRef.current;
+      const focusY    = sc.clientHeight * 0.33;
+      const cTop      = sc.getBoundingClientRect().top;
+
+      // Find which of the 3 adjacent segments is closest to the focus line
+      const lo = Math.max(0, currentSegRef.current - 1);
+      const hi = Math.min(segs.length - 1, currentSegRef.current + 1);
+      let closestSeg = currentSegRef.current, closestDist = Infinity, closestRect = null;
+      for (let i = lo; i <= hi; i++) {
+        const el = sc.querySelector(`[data-seg="${i}"]`);
+        if (!el) continue;
+        const r    = el.getBoundingClientRect();
+        const dist = Math.abs(r.top - cTop - focusY);
+        if (dist < closestDist) { closestDist = dist; closestSeg = i; closestRect = r; }
+      }
+
+      // Trigger pauseBefore state machine once per segment
+      if (
+        closestRect &&
+        segs[closestSeg]?.pauseBefore &&
+        pauseSegRef.current !== closestSeg &&
+        pauseStateRef.current === "idle"
+      ) {
+        const dist = closestRect.top - cTop - focusY;
+        if (Math.abs(dist) < 30) {
+          pauseStateRef.current  = "decelerating";
+          pauseFrameRef.current  = 20;
+          preDecelSpeedRef.current = Math.max(actualSpeedRef.current, 0.05);
+          pauseSegRef.current    = closestSeg;
+        }
+      }
+
+      // Update current segment (triggers HUD re-render)
+      if (closestSeg !== currentSegRef.current) {
+        currentSegRef.current = closestSeg;
+        setCurrentSeg(closestSeg);
+      }
+
+      // Compute increment via state machine
+      let increment = 0;
+      const ps = pauseStateRef.current;
+      if (ps === "idle") {
+        const target = speedRef.current * (SPEED_MAP[segs[currentSegRef.current]?.speed] ?? 1.0);
+        actualSpeedRef.current += (target - actualSpeedRef.current) * 0.05;
+        increment = actualSpeedRef.current * fsRef.current * 2.0 * dt / 1000;
+      } else if (ps === "decelerating") {
+        pauseFrameRef.current--;
+        const t = Math.max(0, pauseFrameRef.current / 20);
+        actualSpeedRef.current = preDecelSpeedRef.current * t;
+        increment = actualSpeedRef.current * fsRef.current * 2.0 * dt / 1000;
+        if (pauseFrameRef.current <= 0) {
+          actualSpeedRef.current = 0;
+          pauseStateRef.current  = "holding";
+          pauseFrameRef.current  = 40;
+        }
+      } else if (ps === "holding") {
+        pauseFrameRef.current--;
+        increment = 0;
+        if (pauseFrameRef.current <= 0) pauseStateRef.current = "resuming";
+      } else {
+        // resuming → back to idle next frame; smooth ramp handled by idle branch
+        pauseStateRef.current = "idle";
+        increment = 0;
+      }
+
+      scrollYRef.current += increment;
+    } else {
+      // ── plain scroll engine (unchanged) ──────────────────────
+      scrollYRef.current += speedRef.current * fsRef.current * 2.0 * dt / 1000;
+    }
+
     if (scrollYRef.current >= maxYRef.current) {
       scrollYRef.current = maxYRef.current; sc.scrollTop = scrollYRef.current;
       playingRef.current = false; setPlaying(false); setProg(); clearInterval(tIntRef.current); return;
@@ -267,8 +377,19 @@ export default function PrompterX() {
     setPlaying(false); clearInterval(tIntRef.current);
   }, []);
 
-  const doRun = useCallback((text, ttl) => {
+  // doRun now accepts optional segments + aiFormatted flag; plain scripts pass nothing
+  const doRun = useCallback((text, ttl, segments, aiFormatted) => {
+    const useAi = !!(aiFormatted && segments?.length);
     setScriptText(text); setTitle(ttl);
+    // AI scroll state
+    segmentsRef.current    = useAi ? segments : [];
+    aiFormattedRef.current = useAi;
+    setRunSegments(useAi ? segments : []);
+    currentSegRef.current  = 0; setCurrentSeg(0);
+    actualSpeedRef.current = 1.0;
+    pauseStateRef.current  = "idle"; pauseFrameRef.current = 0;
+    pauseSegRef.current    = -1;    preDecelSpeedRef.current = 1.0;
+    // scroll state
     scrollYRef.current = 0; maxYRef.current = 0; lastTRef.current = null;
     playingRef.current = false; tBaseRef.current = null;
     setPlaying(false); setProgress(0); setElapsed(0);
@@ -285,6 +406,10 @@ export default function PrompterX() {
   const doRestart = useCallback(() => {
     const was = playingRef.current; doPause();
     scrollYRef.current = 0; tBaseRef.current = null; setElapsed(0); setProgress(0);
+    // reset AI pause machine on restart
+    pauseStateRef.current = "idle"; pauseFrameRef.current = 0;
+    pauseSegRef.current   = -1;     currentSegRef.current = 0;
+    actualSpeedRef.current = 1.0;   setCurrentSeg(0);
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
     if (was) doPlay();
   }, [doPause, doPlay]);
@@ -294,6 +419,7 @@ export default function PrompterX() {
     setShowTimer(false); setShowRunTimer(false);
   }, [noLimit, tMin, tSec]);
 
+  // ── existing upload handler — NOT modified ────────────────────
   const handleFile = useCallback(async (e) => {
     const file = e.target.files && e.target.files[0]; if (!file) return;
     setUploadMsg("Reading…");
@@ -306,6 +432,97 @@ export default function PrompterX() {
       setTimeout(() => setUploadMsg(""), 3000);
     } catch (err) { setUploadMsg("Error: " + (err.message || err)); }
     e.target.value = "";
+  }, []);
+
+  // ── AI upload handler — completely separate ───────────────────
+  const handleAiFile = useCallback(async (e) => {
+    const file = e.target.files && e.target.files[0]; if (!file) return;
+    e.target.value = "";
+
+    const apiKey = process.env.NEXT_PUBLIC_ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      setAiToast("Set NEXT_PUBLIC_ANTHROPIC_API_KEY in Vercel environment variables to use AI Upload");
+      return;
+    }
+
+    setAiUploading(true); setAiToast("");
+
+    // Parse file (same function, separate invocation)
+    let text = "";
+    try {
+      text = (await parseFile(file)).trim();
+      if (!text) { setAiToast("No text found in file"); setAiUploading(false); return; }
+    } catch (err) {
+      setAiToast("Error reading file: " + (err.message || err));
+      setAiUploading(false); return;
+    }
+
+    const ttl = file.name.replace(/\.[^.]+$/, "");
+    let segments = null;
+    let toast    = "";
+
+    try {
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 30000);
+
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 4096,
+          messages: [{
+            role: "user",
+            content:
+`Break this teleprompter script into individual sentences or short phrases. Return a JSON array ONLY — no markdown, no explanation, no code fences. Each element must be exactly:
+{"text":"...","speed":"slow|normal|fast","emphasis":"none|moderate|strong","pauseBefore":true|false,"pauseAfter":true|false,"tone":"calm|energetic|serious|warm|urgent"}
+
+Tagging rules:
+- Key messages, statistics, names, calls to action → slow + strong emphasis
+- Transitions and connective phrases → fast + none
+- Opening and closing lines → slow + pauseBefore and pauseAfter true
+- Emotional or persuasive beats → slow + strong + pauseBefore true
+- Never more than 3 consecutive segments at the same speed
+- Lists and enumerations → normal or fast
+
+Script:
+${text}`,
+          }],
+        }),
+      });
+      clearTimeout(tid);
+
+      if (!resp.ok) throw new Error("api:" + resp.status);
+      const data = await resp.json();
+      const raw  = data.content?.[0]?.text || "";
+      // strip any accidental markdown fences, then extract the JSON array
+      const stripped = raw.replace(/^```[\w]*\n?/m, "").replace(/\n?```$/m, "").trim();
+      const match    = stripped.match(/\[[\s\S]*\]/);
+      const parsed   = JSON.parse(match ? match[0] : stripped);
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("empty");
+      segments = parsed;
+    } catch (err) {
+      if (err.name === "AbortError")          toast = "AI formatting timed out — saved as plain script";
+      else if (err.message === "empty")        toast = "AI returned no segments — saved as plain script";
+      else if (err instanceof SyntaxError)     toast = "AI returned unexpected format — saved as plain script";
+      else if (err.message?.startsWith("api:") || err.name === "TypeError")
+                                               toast = "AI unavailable — saved as plain script";
+      else                                     toast = "AI formatting unavailable — saved as plain script";
+    }
+
+    const entry = segments
+      ? { title: ttl, text, aiFormatted: true,  segments }
+      : { title: ttl, text, aiFormatted: false };
+
+    setScripts(ss => [entry, ...ss.filter(s => s.title !== ttl)]);
+    if (toast) setAiToast(toast);
+    setAiUploading(false);
   }, []);
 
   // ── touch handlers ────────────────────────────────────────────
@@ -353,10 +570,8 @@ export default function PrompterX() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
       streamRef.current = stream;
-
       const mimeType = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
         .find(t => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) || "";
-
       const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
       chunksRef.current = [];
       mr.ondataavailable = e => { if (e.data?.size > 0) chunksRef.current.push(e.data); };
@@ -365,32 +580,20 @@ export default function PrompterX() {
         const blob = new Blob(chunksRef.current, { type: mr.mimeType || "video/webm" });
         const id   = Date.now();
         const rec  = {
-          id,
-          scriptTitle: titleRef.current,
-          mimeType: mr.mimeType || "video/webm",
-          blob,
-          duration: Math.round((Date.now() - recStartRef.current) / 1000),
-          stamp: isoStamp(),
-          label: new Date(id).toLocaleString("en-US", {
-            month: "short", day: "numeric", year: "numeric",
-            hour: "2-digit", minute: "2-digit"
-          }),
+          id, scriptTitle: titleRef.current, mimeType: mr.mimeType || "video/webm", blob,
+          duration: Math.round((Date.now() - recStartRef.current) / 1000), stamp: isoStamp(),
+          label: new Date(id).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" }),
         };
         try { await dbSave(rec); } catch {}
         setRecordings(rs => [rec, ...rs]);
         if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-        setIsRecording(false);
-        setRecElapsed(0);
+        setIsRecording(false); setRecElapsed(0);
       };
-
       recStartRef.current = Date.now();
-      mr.start(1000);
-      mediaRecRef.current = mr;
-      setIsRecording(true);
-      setRecElapsed(0);
+      mr.start(1000); mediaRecRef.current = mr;
+      setIsRecording(true); setRecElapsed(0);
       clearInterval(recIntRef.current);
-      recIntRef.current = setInterval(() =>
-        setRecElapsed(Math.floor((Date.now() - recStartRef.current) / 1000)), 500);
+      recIntRef.current = setInterval(() => setRecElapsed(Math.floor((Date.now() - recStartRef.current) / 1000)), 500);
     } catch (err) {
       setRecError(err.name === "NotAllowedError" ? "Camera/mic permission denied" : "Recording unavailable: " + (err.message || err));
       if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
@@ -429,9 +632,10 @@ export default function PrompterX() {
   }, []);
 
   // ── derived ───────────────────────────────────────────────────
-  const remaining  = targetSec > 0 ? Math.max(0, targetSec - elapsed) : null;
-  const timerStr   = remaining !== null ? fmt(remaining) : fmt(elapsed);
-  const timerWarn  = remaining !== null && remaining <= 30 && remaining > 0;
+  const remaining = targetSec > 0 ? Math.max(0, targetSec - elapsed) : null;
+  const timerStr  = remaining !== null ? fmt(remaining) : fmt(elapsed);
+  const timerWarn = remaining !== null && remaining <= 30 && remaining > 0;
+  const curSegObj = runSegments[currentSeg];
 
   // ── HOME ─────────────────────────────────────────────────────
   if (screen === "home") return (
@@ -442,7 +646,7 @@ export default function PrompterX() {
         PROMPTER<span style={{ opacity: .35 }}>X</span>
       </div>
 
-      {/* Scripts */}
+      {/* Scripts — with AI badge */}
       {scripts.length > 0 && <>
         <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555" }}>Scripts</div>
         {scripts.map((s, i) => (
@@ -450,13 +654,20 @@ export default function PrompterX() {
                                 padding: "14px 16px", display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}
                  onClick={() => { setTitle(s.title); setScriptText(s.text); setEditIdx(i); setScreen("edit"); }}>
-              <div style={{ fontSize: 22, flexShrink: 0 }}>📜</div>
+              <div style={{ fontSize: 22, flexShrink: 0 }}>{s.aiFormatted ? "✦" : "📜"}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 15, fontWeight: 600, color: "#f0ede8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</div>
-                <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{s.text.trim().split(/\s+/).filter(Boolean).length} words</div>
+                <div style={{ fontSize: 12, color: "#666", marginTop: 2, display: "flex", alignItems: "center", gap: 6 }}>
+                  {s.text.trim().split(/\s+/).filter(Boolean).length} words
+                  {s.aiFormatted && (
+                    <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.5, padding: "1px 5px",
+                                   background: "rgba(245,166,35,.12)", color: GOLD,
+                                   border: "1px solid rgba(245,166,35,.3)", borderRadius: 4 }}>✦ AI</span>
+                  )}
+                </div>
               </div>
             </div>
-            <button onClick={() => doRun(s.text, s.title)}
+            <button onClick={() => doRun(s.text, s.title, s.segments, s.aiFormatted)}
               style={{ background: "rgba(245,166,35,.15)", border: "1px solid rgba(245,166,35,.3)", borderRadius: 8,
                        width: 34, height: 34, color: GOLD, fontSize: 16, cursor: "pointer",
                        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>▶</button>
@@ -495,14 +706,15 @@ export default function PrompterX() {
                      display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>↓</button>
           <button onClick={() => deleteRec(rec.id)}
             style={{ background: "rgba(232,64,64,.1)", border: "none", borderRadius: 8,
-                       width: 34, height: 34, color: RED, fontSize: 15, cursor: "pointer",
-                       display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>🗑</button>
-          </div>
-        ))}
+                     width: 34, height: 34, color: RED, fontSize: 15, cursor: "pointer",
+                     display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>🗑</button>
+        </div>
+      ))}
 
       {/* Add script */}
       <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#555", marginTop: 4 }}>Add Script</div>
 
+      {/* Card 1 — plain upload, NOT modified */}
       <label style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
                       padding: "14px 16px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}>
         <div style={{ fontSize: 22, flexShrink: 0 }}>📎</div>
@@ -514,6 +726,22 @@ export default function PrompterX() {
         </div>
         <div style={{ fontSize: 18, color: "#444" }}>›</div>
         <input type="file" accept=".txt,.text,.md,.rtf,.doc,.docx,.pdf" onChange={handleFile} style={{ display: "none" }} />
+      </label>
+
+      {/* Card 2 — AI upload, completely separate */}
+      <label style={{ background: "#161616", border: `1px solid ${aiUploading ? "rgba(245,166,35,.4)" : "rgba(245,166,35,.2)"}`,
+                      borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14,
+                      cursor: aiUploading ? "not-allowed" : "pointer", opacity: aiUploading ? 0.85 : 1 }}>
+        <div style={{ fontSize: 20, flexShrink: 0, color: GOLD, fontWeight: 700 }}>✦</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: "#f0ede8" }}>AI Upload</div>
+          <div style={{ fontSize: 12, color: aiUploading ? GOLD : aiUploadMsg ? GOLD : "#888", marginTop: 2 }}>
+            {aiUploading ? `Analysing your script${dotStr}` : aiUploadMsg || "Formatted for delivery by Claude"}
+          </div>
+        </div>
+        <div style={{ fontSize: 18, color: aiUploading ? "#333" : "#666" }}>›</div>
+        <input type="file" accept=".txt,.text,.md,.rtf,.doc,.docx,.pdf"
+               onChange={handleAiFile} disabled={aiUploading} style={{ display: "none" }} />
       </label>
 
       <div style={{ background: "#161616", border: "1px solid #2a2a2a", borderRadius: 14,
@@ -547,6 +775,17 @@ export default function PrompterX() {
              onClick={() => setShowTimer(false)}>
           <TimerSheet tMin={tMin} setTMin={setTMin} tSec={tSec} setTSec={setTSec}
             noLimit={noLimit} setNoLimit={setNoLimit} onConfirm={applyTimer} onCancel={() => setShowTimer(false)} />
+        </div>
+      )}
+
+      {/* AI toast */}
+      {aiToast && (
+        <div style={{ position: "fixed", bottom: 20, left: 16, right: 16, background: "#1e1e1e",
+                      border: "1px solid #333", borderRadius: 12, padding: "12px 16px", zIndex: 100,
+                      display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 13, color: "#f0ede8", flex: 1 }}>{aiToast}</span>
+          <button onClick={() => setAiToast("")}
+            style={{ background: "none", border: "none", color: "#555", fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1, flexShrink: 0 }}>✕</button>
         </div>
       )}
 
@@ -597,15 +836,52 @@ export default function PrompterX() {
     <div style={{ position: "fixed", inset: 0, background: "#000", overflow: "hidden", userSelect: "none" }}
          onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
 
+      {/* Scrollable content */}
       <div ref={scrollRef}
         style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
                  overflowY: "scroll", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
         <div style={{ paddingTop: "33vh", paddingBottom: "67vh", paddingLeft: "8vw", paddingRight: "8vw",
                       fontSize, lineHeight: 1.8, color: "rgba(255,255,255,.92)",
                       whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "'Courier New',monospace" }}>
-          {scriptText.split(/\n\n+/).filter(p => p.trim()).map((p, i) => (
-            <p key={i} style={{ marginBottom: "1.3em" }}>{p.replace(/\n/g, " ")}</p>
-          ))}
+
+          {runSegments.length > 0 ? (
+            // ── AI segment renderer ───────────────────────────
+            runSegments.map((seg, i) => {
+              const isUrgent    = seg.tone === "urgent";
+              const isEnergetic = seg.tone === "energetic";
+              const isSerious   = seg.tone === "serious";
+              return (
+                <div key={i}>
+                  {seg.pauseBefore && (
+                    <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", marginBottom: "0.5em" }} />
+                  )}
+                  <p
+                    data-seg={i}
+                    style={{
+                      marginTop:    seg.pauseBefore ? "2em"  : "0.5em",
+                      marginBottom: seg.pauseAfter  ? "2em"  : "0.5em",
+                      fontWeight:   seg.emphasis === "strong" ? 900 : seg.emphasis === "moderate" ? 700 : 400,
+                      color:        seg.emphasis === "strong" ? GOLD
+                                  : seg.emphasis === "moderate" ? "rgba(255,255,255,0.95)"
+                                  : "rgba(255,255,255,0.72)",
+                      fontSize:     seg.speed === "slow" ? "1.08em" : seg.speed === "fast" ? "0.94em" : "1em",
+                      ...(isUrgent    ? { borderLeft: "3px solid #e84040", paddingLeft: "12px" } :
+                          isEnergetic ? { borderLeft: "3px solid #f5a623", paddingLeft: "12px" } :
+                          isSerious   ? { borderLeft: "3px solid #666",    paddingLeft: "12px" } : {}),
+                      lineHeight: 1.8,
+                    }}
+                  >
+                    {seg.text}
+                  </p>
+                </div>
+              );
+            })
+          ) : (
+            // ── plain renderer (unchanged) ────────────────────
+            scriptText.split(/\n\n+/).filter(p => p.trim()).map((p, i) => (
+              <p key={i} style={{ marginBottom: "1.3em" }}>{p.replace(/\n/g, " ")}</p>
+            ))
+          )}
         </div>
       </div>
 
@@ -615,42 +891,51 @@ export default function PrompterX() {
       <div style={{ position: "absolute", top: "33%", left: 0, right: 0, height: 2, background: `linear-gradient(90deg,transparent,${GOLD} 20%,${GOLD} 80%,transparent)`, boxShadow: `0 0 10px ${GOLD}`, opacity: .55, pointerEvents: "none", zIndex: 6 }} />
 
       {/* Top HUD */}
-      <div style={{ position: "absolute", top: 0, left: 0, right: 0, display: "flex", alignItems: "center",
-                    justifyContent: "space-between", padding: "16px 18px 12px",
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 10,
                     paddingTop: "max(16px, calc(env(safe-area-inset-top) + 8px))",
-                    background: "linear-gradient(to bottom,rgba(0,0,0,.9),transparent)", zIndex: 10 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 2, opacity: .8, maxWidth: "28%",
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {title.toUpperCase()}
-        </div>
+                    background: "linear-gradient(to bottom,rgba(0,0,0,.9),transparent)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 18px 8px" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 2, opacity: .8, maxWidth: "28%",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {title.toUpperCase()}
+          </div>
 
-        <button onClick={() => setShowRunTimer(true)}
-          style={{ fontSize: 20, fontWeight: 900, letterSpacing: 2, background: "none", border: "none",
-                   cursor: "pointer", padding: 0, fontFamily: "sans-serif",
-                   color: timerWarn ? "#f44" : remaining !== null ? GOLD : "rgba(255,255,255,.4)" }}>
-          {timerStr}
-        </button>
-
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {/* Record / Stop button */}
-          <button onClick={isRecording ? stopRec : startRec}
-            style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 9px",
-                     borderRadius: 8, border: `1px solid ${isRecording ? RED : "rgba(232,64,64,.4)"}`,
-                     background: isRecording ? "rgba(232,64,64,.2)" : "transparent", cursor: "pointer" }}>
-            <span style={{ width: isRecording ? 8 : 10, height: isRecording ? 8 : 10,
-                           borderRadius: isRecording ? 2 : "50%",
-                           background: RED, display: "block", flexShrink: 0 }} />
-            <span style={{ fontSize: 11, fontWeight: 700, color: isRecording ? RED : "rgba(232,64,64,.7)",
-                           letterSpacing: 1 }}>
-              {isRecording ? fmt(recElapsed) : "REC"}
-            </span>
+          <button onClick={() => setShowRunTimer(true)}
+            style={{ fontSize: 20, fontWeight: 900, letterSpacing: 2, background: "none", border: "none",
+                     cursor: "pointer", padding: 0, fontFamily: "sans-serif",
+                     color: timerWarn ? "#f44" : remaining !== null ? GOLD : "rgba(255,255,255,.4)" }}>
+            {timerStr}
           </button>
 
-          <div style={{ fontSize: 11, fontWeight: 700, padding: "5px 9px", borderRadius: 6, letterSpacing: 1,
-                        background: playing ? RED : GOLD, color: playing ? "#fff" : "#000" }}>
-            {playing ? "LIVE" : "READY"}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button onClick={isRecording ? stopRec : startRec}
+              style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 9px",
+                       borderRadius: 8, border: `1px solid ${isRecording ? RED : "rgba(232,64,64,.4)"}`,
+                       background: isRecording ? "rgba(232,64,64,.2)" : "transparent", cursor: "pointer" }}>
+              <span style={{ width: isRecording ? 8 : 10, height: isRecording ? 8 : 10,
+                             borderRadius: isRecording ? 2 : "50%",
+                             background: RED, display: "block", flexShrink: 0 }} />
+              <span style={{ fontSize: 11, fontWeight: 700, color: isRecording ? RED : "rgba(232,64,64,.7)", letterSpacing: 1 }}>
+                {isRecording ? fmt(recElapsed) : "REC"}
+              </span>
+            </button>
+            <div style={{ fontSize: 11, fontWeight: 700, padding: "5px 9px", borderRadius: 6, letterSpacing: 1,
+                          background: playing ? RED : GOLD, color: playing ? "#fff" : "#000" }}>
+              {playing ? "LIVE" : "READY"}
+            </div>
           </div>
         </div>
+
+        {/* AI segment indicator — only for AI scripts */}
+        {curSegObj && (
+          <div style={{ textAlign: "center", paddingBottom: 8 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase",
+                           padding: "3px 10px", borderRadius: 20, background: "rgba(255,255,255,.06)",
+                           color: TONE_COLOR[curSegObj.tone] || "rgba(255,255,255,0.4)" }}>
+              {curSegObj.speed} · {curSegObj.tone}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* rec error toast */}
