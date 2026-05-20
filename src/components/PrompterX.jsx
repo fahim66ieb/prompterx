@@ -375,7 +375,7 @@ export default function PrompterX() {
 
   // ── RUN ──────────────────────────────────────────────────────
   return (
-    <div style={{ position:"relative",height:"100vh",background:"#000",overflow:"hidden",userSelect:"none" }}
+    <div style={{ position:"fixed",inset:0,background:"#000",overflow:"hidden",userSelect:"none" }}
          onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
 
       <div ref={scrollRef}
@@ -398,6 +398,7 @@ export default function PrompterX() {
       {/* Top HUD */}
       <div style={{position:"absolute",top:0,left:0,right:0,display:"flex",alignItems:"center",
                    justifyContent:"space-between",padding:"16px 18px 12px",
+                   paddingTop:"max(16px, calc(env(safe-area-inset-top) + 8px))",
                    background:"linear-gradient(to bottom,rgba(0,0,0,.9),transparent)",zIndex:10}}>
         <div style={{fontSize:14,fontWeight:700,letterSpacing:2,opacity:.8,maxWidth:"35%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
           {title.toUpperCase()}
@@ -415,6 +416,7 @@ export default function PrompterX() {
 
       {/* Bottom controls */}
       <div style={{position:"absolute",bottom:0,left:0,right:0,padding:"8px 16px 28px",
+                   paddingBottom:"max(28px, calc(env(safe-area-inset-bottom) + 12px))",
                    background:"linear-gradient(to top,rgba(0,0,0,.95) 70%,transparent)",zIndex:10}}>
         <div style={{height:3,background:"rgba(255,255,255,.12)",borderRadius:2,marginBottom:12,overflow:"hidden"}}>
           <div style={{height:"100%",background:GOLD,width:progress.toFixed(1)+"%",borderRadius:2}}/>
