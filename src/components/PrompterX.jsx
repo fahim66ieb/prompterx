@@ -205,18 +205,22 @@ export default function PrompterX() {
   const streamRef    = useRef(null);
   const recStartRef  = useRef(null);
   const recIntRef    = useRef(null);
-  const replayUrlRef = useRef(null);
-  const titleRef     = useRef(title);
+  const replayUrlRef     = useRef(null);
+  const titleRef         = useRef(title);
+  const scriptsReadyRef  = useRef(false); // gate: don't save until after initial load
 
   useEffect(() => { titleRef.current = title; }, [title]);
 
-  // persist scripts to localStorage
-  useEffect(() => { lsSaveScripts(scripts); }, [scripts]);
+  // persist scripts — only after initial load to avoid overwriting on mount
+  useEffect(() => {
+    if (scriptsReadyRef.current) lsSaveScripts(scripts);
+  }, [scripts]);
 
   // load scripts + recordings on mount
   useEffect(() => {
     const saved = lsLoadScripts();
     if (saved !== null) setScripts(saved);
+    scriptsReadyRef.current = true;
     dbLoad().then(setRecordings).catch(() => {});
     return () => {
       stopRecNow();
