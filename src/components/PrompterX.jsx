@@ -465,9 +465,13 @@ export default function PrompterX() {
     style.textContent = [
       `.px-slider::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#f5a623;cursor:pointer;box-shadow:0 0 6px rgba(245,166,35,0.4)}`,
       `.px-slider::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:#f5a623;cursor:pointer;border:none;box-shadow:0 0 6px rgba(245,166,35,0.4)}`,
-      `.px-sent-current{background:rgba(245,166,35,0.18)!important;border-radius:3px;}`,
-      `.px-sent-past{opacity:0.35!important;}`,
-      `.px-sent-current,.px-sent-next,.px-sent-past{transition:opacity 0.3s ease,background 0.3s ease;}`,
+      `.px-sent-current{background:rgba(245,166,35,0.22)!important;border-radius:3px;opacity:1!important;}`,
+      `.px-sent-next{opacity:0.9!important;}`,
+      `.px-sent-r1{opacity:0.70!important;}`,
+      `.px-sent-r2{opacity:0.50!important;}`,
+      `.px-sent-r3{opacity:0.35!important;}`,
+      `.px-sent-past{opacity:0.18!important;}`,
+      `.px-sent-current,.px-sent-next,.px-sent-r1,.px-sent-r2,.px-sent-r3,.px-sent-past{transition:opacity 0.25s ease,background 0.25s ease;}`,
     ].join("");
     document.head.appendChild(style);
     return () => document.head.removeChild(style);
@@ -793,18 +797,22 @@ export default function PrompterX() {
     return wordToSentenceRef.current[wordIdx] ?? 0;
   }
 
-  // ── sentence highlight (CSS classes — AI container styles unaffected) ──
+  // ── sentence highlight: current+next bright, last 4 visible, older faded ──
   function updateSentenceHighlights(sentenceIdx) {
-    document.querySelectorAll("[data-word-index]").forEach(el => {
-      el.classList.remove("px-sent-current", "px-sent-next", "px-sent-past");
-    });
+    const ALL = ["px-sent-current","px-sent-next","px-sent-r1","px-sent-r2","px-sent-r3","px-sent-past"];
+    document.querySelectorAll("[data-word-index]").forEach(el => el.classList.remove(...ALL));
     const sentences = sentencesRef.current;
     if (!sentences.length) return;
     sentences.forEach((sent, si) => {
-      const cls = si === sentenceIdx     ? "px-sent-current"
-                : si === sentenceIdx + 1 ? "px-sent-next"
-                : si < sentenceIdx       ? "px-sent-past"
-                : "";
+      const delta = si - sentenceIdx; // negative = past, 0 = current, positive = future
+      let cls;
+      if      (delta === 0)  cls = "px-sent-current"; // being spoken now   — gold bg
+      else if (delta === 1)  cls = "px-sent-next";    // upcoming line       — near-full opacity
+      else if (delta === -1) cls = "px-sent-r1";      // 1 line ago          — 70%
+      else if (delta === -2) cls = "px-sent-r2";      // 2 lines ago         — 50%
+      else if (delta === -3) cls = "px-sent-r3";      // 3 lines ago (edge)  — 35%
+      else if (delta < -3)   cls = "px-sent-past";    // 4+ lines ago        — very dim
+      else                   cls = "";                 // future beyond next  — default
       if (!cls) return;
       for (let i = sent.start; i <= sent.end; i++) {
         const el = document.querySelector(`[data-word-index="${i}"]`);
@@ -982,7 +990,9 @@ export default function PrompterX() {
           const sc     = scrollRef.current;
           const scRect = sc.getBoundingClientRect();
           const elRect = el.getBoundingClientRect();
-          estScrollPosRef.current = sc.scrollTop + (elRect.top - scRect.top) - scRect.height * 0.33;
+          // Focus at 65% down so the current line sits in the lower portion,
+          // leaving ~4 previous lines visible above it in the viewport
+          estScrollPosRef.current = sc.scrollTop + (elRect.top - scRect.top) - scRect.height * 0.65;
         }
 
         // Update sentence highlight
