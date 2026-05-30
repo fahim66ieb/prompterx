@@ -102,23 +102,41 @@ function editDistance(a, b) {
 }
 
 function findBestMatch(transcript, tokens, lastIdx) {
+  if (!transcript || !tokens.length) return lastIdx;
+  // Use only last 5 words — earlier words cause false positives on repeated phrases
   const heard = transcript.trim().toLowerCase()
-    .split(/\s+/).filter(Boolean).slice(-4)
+    .split(/\s+/).filter(Boolean).slice(-5)
     .map(w => w.replace(/[^a-z0-9']/g, ""));
   if (!heard.length) return lastIdx;
-  const searchEnd = Math.min(tokens.length, lastIdx + 60);
+  // CRITICAL: never search backward; hard cap at +30 words to prevent wild jumps
+  const searchStart = lastIdx;
+  const searchEnd   = Math.min(tokens.length - 1, lastIdx + 30);
   let bestScore = 0, bestIdx = lastIdx;
-  for (let i = lastIdx; i < searchEnd; i++) {
-    let score = 0, matched = 0;
+  for (let i = searchStart; i <= searchEnd; i++) {
+    let score = 0, matchCount = 0;
     for (let j = 0; j < heard.length && i + j < tokens.length; j++) {
-      const a = heard[j], b = tokens[i + j].word;
-      if (a === b)                      { score += 1.0; matched++; }
-      else if (editDistance(a, b) <= 2) { score += 0.7; matched++; }
+      const a = heard[j];
+      const b = tokens[i + j]?.word || "";
+      if (!a || !b) continue;
+      if (a === b) {
+        score += 1.0; matchCount++;
+      } else if (a.length > 3 && b.length > 3 && editDistance(a, b) <= 1) {
+        score += 0.8; matchCount++;
+      } else if (a.length > 4 && b.length > 4 && editDistance(a, b) <= 2) {
+        score += 0.5; matchCount++;
+      }
     }
-    const normalised = heard.length > 0 ? score / heard.length : 0;
-    if (normalised > bestScore && matched >= 1) { bestScore = normalised; bestIdx = i + heard.length - 1; }
+    if (matchCount === 0) continue;
+    const normalised = score / heard.length;
+    // Higher confidence threshold (0.65) + require ≥2 matches for 3+ word transcripts
+    const minMatches = heard.length >= 3 ? 2 : 1;
+    if (normalised > bestScore && normalised >= 0.65 && matchCount >= minMatches) {
+      bestScore = normalised;
+      bestIdx   = i + matchCount - 1;
+    }
   }
-  return bestScore >= 0.45 ? bestIdx : lastIdx;
+  // Never advance more than 25 words in one match to cap jitter
+  return Math.min(bestIdx, lastIdx + 25);
 }
 
 function renderScriptContent(text, useSpeechSpans) {
@@ -408,17 +426,21 @@ export default function PrompterX() {
   const speechTrackingRef      = useRef(false); // mirrors state — safe inside async callbacks
   const screenRef              = useRef("home"); // mirrors state — safe inside async callbacks
   const baseSpeedRef           = useRef(1.0);   // mirrors state — used in doRun without dep
-  // smooth scroll (speech tracking)
-  const targetScrollRef        = useRef(0);     // where speech wants us (updated by recognition)
-  const smoothScrollRef        = useRef(0);     // current glide position
-  const smoothRafRef           = useRef(null);  // smooth scroll RAF id
-  const activeSentenceRef      = useRef(-1);    // sentence index currently highlighted
-  const speechVelocityRef      = useRef(0);     // words per second (EMA)
-  const lastMatchTimeRef       = useRef(0);     // ms timestamp of last word match
-  const wordMatchCountRef      = useRef(0);     // consecutive match count
+  // speech velocity engine refs
+  const estScrollPosRef        = useRef(0);     // scroll pos where last confirmed word lives
+  const confirmedIdxRef        = useRef(0);     // last high-confidence word index (monotonic)
+  const speechWpsRef           = useRef(2.5);   // measured words/sec EMA (150 wpm default)
+  const currentSpeedRef        = useRef(0);     // actual scroll speed px/sec (smoothed)
+  const speechActiveRef        = useRef(false); // true when speech was heard recently
+  const lastSpeechTimeRef      = useRef(0);     // ms timestamp of last recognition event
   const speechPausedRef        = useRef(false); // true while speaker is silent
-  const sentencesRef           = useRef([]);    // [{start,end,text}]
-  const wordToSentenceRef      = useRef({});    // wordIdx → sentenceIdx
+  const speechRafRef           = useRef(null);  // velocity engine RAF id
+  const frameCountRef          = useRef(0);     // frame counter for drift correction
+  const avgPxPerWordRef        = useRef(0);     // calibrated px per word
+  // sentence tracking
+  const activeSentenceRef      = useRef(-1);
+  const sentencesRef           = useRef([]);
+  const wordToSentenceRef      = useRef({});
 
   // ── constants ─────────────────────────────────────────────────
   const voiceApiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY || "";
@@ -749,9 +771,7 @@ export default function PrompterX() {
 
   // ── sentence map ──────────────────────────────────────────────
   function buildSentenceMap(text) {
-    // Build the flat token list (shared with findBestMatch)
     scriptTokensRef.current = tokenizeScript(text);
-    // Split text into sentences on . ! ? boundaries
     const rawSentences = text.match(/[^.!?]+[.!?]*/g) || [text];
     let wordCursor = 0;
     const sentences = [];
@@ -765,7 +785,7 @@ export default function PrompterX() {
       for (let w = start; w <= end; w++) w2s[w] = si;
       wordCursor += sentWords.length;
     });
-    sentencesRef.current    = sentences;
+    sentencesRef.current      = sentences;
     wordToSentenceRef.current = w2s;
   }
 
@@ -773,7 +793,7 @@ export default function PrompterX() {
     return wordToSentenceRef.current[wordIdx] ?? 0;
   }
 
-  // ── sentence-level highlight (CSS classes only, so AI container styles survive) ──
+  // ── sentence highlight (CSS classes — AI container styles unaffected) ──
   function updateSentenceHighlights(sentenceIdx) {
     document.querySelectorAll("[data-word-index]").forEach(el => {
       el.classList.remove("px-sent-current", "px-sent-next", "px-sent-past");
@@ -793,128 +813,210 @@ export default function PrompterX() {
     });
   }
 
-  // ── adaptive glide factor ──────────────────────────────────────
-  function getAdaptiveFactor() {
-    if (speechPausedRef.current) return 0.015; // decelerate to a stop when speaker is silent
-    const wps = speechVelocityRef.current; // words per second (EMA)
-    if (wps <= 0) return 0.06;
-    // Typical speech: 2.0–3.5 wps → map to factor 0.04–0.10
-    const normalised = Math.max(0, Math.min(1, (wps - 1.5) / 2.5));
-    return 0.04 + normalised * 0.06;
-  }
-
-  // ── smooth scroll RAF loop ─────────────────────────────────────
-  function startSmoothScrollLoop() {
-    if (smoothRafRef.current) return; // already running
-    function frame() {
-      const sc = scrollRef.current;
-      if (!sc) { smoothRafRef.current = null; return; }
-      const target  = targetScrollRef.current;
-      const current = smoothScrollRef.current;
-      const diff    = target - current;
-      if (Math.abs(diff) > 0.3) {
-        const factor = getAdaptiveFactor();
-        smoothScrollRef.current += diff * factor;
-        sc.scrollTop = smoothScrollRef.current;
-        scrollYRef.current = smoothScrollRef.current;
-        setProg();
-      }
-      smoothRafRef.current = requestAnimationFrame(frame);
-    }
-    smoothScrollRef.current = scrollRef.current?.scrollTop ?? 0;
-    smoothRafRef.current = requestAnimationFrame(frame);
-  }
-
-  function stopSmoothScrollLoop() {
-    if (smoothRafRef.current) {
-      cancelAnimationFrame(smoothRafRef.current);
-      smoothRafRef.current = null;
-    }
-  }
-
-  // ── scrollToWordIndex — sets target only, never jumps ─────────
-  function scrollToWordIndex(idx) {
+  // ── calibration: px-per-word ratio ────────────────────────────
+  function calibrateScrollGeometry() {
     const sc = scrollRef.current;
     if (!sc) return;
-    const sentenceIdx = getSentenceForWordIndex(idx);
-    // Update sentence highlighting if we've moved to a new sentence
-    if (sentenceIdx !== activeSentenceRef.current) {
-      updateSentenceHighlights(sentenceIdx);
-      activeSentenceRef.current = sentenceIdx;
-    }
-    const el = document.querySelector(`[data-word-index="${idx}"]`);
-    if (!el) return;
-    // Compute target so matched word sits at the focus line (33% from top)
-    const scRect = sc.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const focusPx = scRect.height * 0.33;
-    const raw = sc.scrollTop + (elRect.top - scRect.top) - focusPx;
-    targetScrollRef.current = Math.max(0, Math.min(maxYRef.current, raw));
-    // Update speech velocity EMA
-    const now = Date.now();
-    if (lastMatchTimeRef.current > 0) {
-      const elapsed = (now - lastMatchTimeRef.current) / 1000;
-      if (elapsed > 0 && elapsed < 3) {
-        const instant = 1 / elapsed;
-        speechVelocityRef.current = speechVelocityRef.current * 0.7 + instant * 0.3;
+    const tokens = scriptTokensRef.current;
+    if (!tokens.length) return;
+    const firstEl = document.querySelector('[data-word-index="0"]');
+    const lastEl  = document.querySelector(`[data-word-index="${tokens.length - 1}"]`);
+    if (firstEl && lastEl) {
+      const firstTop = firstEl.getBoundingClientRect().top;
+      const lastTop  = lastEl.getBoundingClientRect().top;
+      const totalPx  = lastTop - firstTop;
+      const ratio    = totalPx / Math.max(tokens.length, 1);
+      if (ratio >= 5 && ratio <= 200) {
+        avgPxPerWordRef.current = ratio;
+        return;
       }
     }
-    lastMatchTimeRef.current = now;
+    // Fallback: estimate from font size and line height
+    avgPxPerWordRef.current = fsRef.current * 1.8 * 0.6;
   }
 
-  // ── reset speech state (called on start and restart) ──────────
+  // ── velocity scroll engine (runs continuously while speech tracking active) ──
+  function startVelocityScrollEngine() {
+    if (speechRafRef.current) return; // guard: never double-start
+    // Also guard against manual scroll engine conflict
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+
+    let lastFrameTime = performance.now();
+
+    function frame(now) {
+      const sc = scrollRef.current;
+      if (!sc) { speechRafRef.current = null; return; }
+
+      const dt = Math.min((now - lastFrameTime) / 1000, 0.1); // cap at 100 ms
+      lastFrameTime = now;
+
+      const isActive  = speechActiveRef.current;
+      const isPaused  = speechPausedRef.current;
+      const pxPerWord = avgPxPerWordRef.current || (fsRef.current * 1.1);
+      const wps       = speechWpsRef.current;
+
+      // Target speed: speaking → wps × px/word; paused → 0
+      const targetSpeed = (isActive && !isPaused) ? wps * pxPerWord : 0;
+
+      // Smooth speed toward target — fast ramp-up, slow ramp-down (natural feel)
+      const factor = targetSpeed > currentSpeedRef.current ? 0.12 : 0.05;
+      currentSpeedRef.current += (targetSpeed - currentSpeedRef.current) * factor;
+
+      // Snap to zero when nearly stopped and paused
+      if (currentSpeedRef.current < 0.5 && isPaused) currentSpeedRef.current = 0;
+
+      // Advance scroll
+      if (currentSpeedRef.current > 0.1) {
+        const newScroll = Math.min(maxYRef.current, sc.scrollTop + currentSpeedRef.current * dt);
+        sc.scrollTop       = newScroll;
+        scrollYRef.current = newScroll;
+        setProg();
+        if (newScroll >= maxYRef.current) {
+          currentSpeedRef.current = 0;
+          speechActiveRef.current = false;
+        }
+      }
+
+      // Drift correction every ~30 frames (~500 ms at 60 fps)
+      frameCountRef.current = (frameCountRef.current || 0) + 1;
+      if (frameCountRef.current % 30 === 0 && estScrollPosRef.current > 0) {
+        const drift = estScrollPosRef.current - sc.scrollTop;
+        if (drift > 80 && drift < 600) {
+          // Behind: nudge speed up to close the gap
+          currentSpeedRef.current += drift * 0.008;
+        } else if (drift < -200) {
+          // Ahead: nudge speed down
+          currentSpeedRef.current = Math.max(0, currentSpeedRef.current + drift * 0.003);
+        }
+      }
+
+      speechRafRef.current = requestAnimationFrame(frame);
+    }
+
+    speechRafRef.current = requestAnimationFrame(frame);
+  }
+
+  function stopVelocityScrollEngine() {
+    if (speechRafRef.current) {
+      cancelAnimationFrame(speechRafRef.current);
+      speechRafRef.current = null;
+    }
+    currentSpeedRef.current = 0;
+  }
+
+  // ── reset speech state ─────────────────────────────────────────
   function resetSpeechState() {
-    targetScrollRef.current   = 0;
-    smoothScrollRef.current   = 0;
-    activeSentenceRef.current = -1;
-    speechVelocityRef.current = 0;
-    lastMatchTimeRef.current  = 0;
-    wordMatchCountRef.current = 0;
+    estScrollPosRef.current   = 0;
+    confirmedIdxRef.current   = 0;
+    speechWpsRef.current      = 2.5;
+    currentSpeedRef.current   = 0;
+    speechActiveRef.current   = false;
+    lastSpeechTimeRef.current = 0;
     speechPausedRef.current   = false;
+    frameCountRef.current     = 0;
+    avgPxPerWordRef.current   = 0;
+    activeSentenceRef.current = -1;
     wordToSentenceRef.current = {};
     sentencesRef.current      = [];
+    lastWordIdxRef.current    = 0;
   }
 
   function startSpeechTracking() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setSpeechStatus("unsupported"); return; }
-    // Build sentence map (also builds scriptTokensRef)
     const isAiMode = aiFormattedRef.current && segmentsRef.current.length > 0;
     const text = isAiMode
       ? segmentsRef.current.map(s => s.text).join(" ")
       : runTextRef.current;
     resetSpeechState();
     buildSentenceMap(text);
-    lastWordIdxRef.current = 0;
-    // Start the smooth scroll glide loop
-    startSmoothScrollLoop();
+    // Calibrate geometry after DOM has rendered (300 ms), then start velocity engine
+    setTimeout(() => {
+      calibrateScrollGeometry();
+      startVelocityScrollEngine();
+    }, 300);
+
+    // ── recognition setup ──────────────────────────────────────
+    let lastTranscriptLength = 0;
     const rec = new SR();
     rec.continuous      = true;
     rec.interimResults  = true;
     rec.lang            = "en-US";
     rec.maxAlternatives = 1;
-    rec.onstart  = () => setSpeechStatus("listening");
+
+    rec.onstart = () => setSpeechStatus("listening");
+
     rec.onresult = (e) => {
-      let transcript = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) transcript += e.results[i][0].transcript;
-      const newIdx = findBestMatch(transcript, scriptTokensRef.current, lastWordIdxRef.current);
-      if (newIdx > lastWordIdxRef.current) {
-        lastWordIdxRef.current = newIdx;
-        speechPausedRef.current = false;  // speaker is talking
-        scrollToWordIndex(newIdx);
-      }
+      speechActiveRef.current   = true;
+      lastSpeechTimeRef.current = Date.now();
+      speechPausedRef.current   = false;
       setSpeechStatus("listening");
+
+      // Accumulate full transcript for this segment
+      let transcript = "";
+      let hasFinal   = false;
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        transcript += e.results[i][0].transcript;
+        if (e.results[i].isFinal) hasFinal = true;
+      }
+
+      // Measure new words to estimate velocity
+      const transcriptWords = transcript.trim().split(/\s+/).filter(Boolean);
+      const newWordCount    = Math.max(0, transcriptWords.length - lastTranscriptLength);
+      lastTranscriptLength  = transcriptWords.length;
+      if (newWordCount > 0) {
+        // Conservative estimate: ~0.5s per recognition event
+        const instantWps = newWordCount / 0.5;
+        speechWpsRef.current = speechWpsRef.current * 0.75 + instantWps * 0.25;
+      }
+
+      // Find confirmed position (monotonic — never moves backward)
+      const newIdx = findBestMatch(transcript, scriptTokensRef.current, confirmedIdxRef.current);
+      if (newIdx > confirmedIdxRef.current) {
+        confirmedIdxRef.current = newIdx;
+        lastWordIdxRef.current  = newIdx;
+
+        // Record where this word sits for drift correction
+        const el = document.querySelector(`[data-word-index="${newIdx}"]`);
+        if (el && scrollRef.current) {
+          const sc     = scrollRef.current;
+          const scRect = sc.getBoundingClientRect();
+          const elRect = el.getBoundingClientRect();
+          estScrollPosRef.current = sc.scrollTop + (elRect.top - scRect.top) - scRect.height * 0.33;
+        }
+
+        // Update sentence highlight
+        const sentIdx = getSentenceForWordIndex(newIdx);
+        if (sentIdx !== activeSentenceRef.current) {
+          updateSentenceHighlights(sentIdx);
+          activeSentenceRef.current = sentIdx;
+        }
+      }
+
+      // On final result, reset accumulator for next segment
+      if (hasFinal) lastTranscriptLength = 0;
+
+      // Silence timer: 1.2 s of no results → pause
       clearTimeout(speechRestartRef.current);
-      // After 1.5 s of no new matches → pause state (glide decelerates)
       speechRestartRef.current = setTimeout(() => {
+        speechActiveRef.current = false;
         speechPausedRef.current = true;
         setSpeechStatus("paused");
-      }, 1500);
+      }, 1200);
     };
-    rec.onspeechend = () => { speechPausedRef.current = true; setSpeechStatus("paused"); };
+
+    rec.onspeechend = () => {
+      speechActiveRef.current = false;
+      speechPausedRef.current = true;
+      setSpeechStatus("paused");
+    };
     rec.onerror = (e) => {
       if (e.error === "not-allowed") setSpeechStatus("error");
-      else if (e.error !== "no-speech") { speechPausedRef.current = true; setSpeechStatus("paused"); }
+      else if (e.error !== "no-speech") {
+        speechActiveRef.current = false;
+        speechPausedRef.current = true;
+        setSpeechStatus("paused");
+      }
     };
     rec.onend = () => {
       if (speechTrackingRef.current && screenRef.current === "run") {
@@ -927,13 +1029,12 @@ export default function PrompterX() {
 
   function stopSpeechTracking() {
     clearTimeout(speechRestartRef.current);
-    stopSmoothScrollLoop();
+    stopVelocityScrollEngine();
     if (recognitionRef.current) {
       try { recognitionRef.current.abort(); } catch {}
       recognitionRef.current = null;
     }
     setSpeechStatus("stopped");
-    // Remove all sentence highlight classes
     document.querySelectorAll("[data-word-index]").forEach(el => {
       el.classList.remove("px-sent-current", "px-sent-next", "px-sent-past");
     });
@@ -1040,22 +1141,31 @@ export default function PrompterX() {
     clearInterval(tIntRef.current);
     tIntRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - tBaseRef.current) / 1000)), 500);
     if (speechTrackingRef.current) {
-      // Speech tracking drives scroll — skip RAF, but recording/voiceover still work
+      // Velocity engine drives scroll — guard: do NOT start manual RAF
+      speechActiveRef.current = false; // wait for actual speech before moving
+      speechPausedRef.current = true;
+      startVelocityScrollEngine();     // idempotent — no-op if already running
       if (recordingEnabledRef.current && !isRecordingRef.current) startRecording();
       if (voicePersonaRef.current) startVoiceover();
       return;
     }
-    rafRef.current = requestAnimationFrame(loop);
+    // Manual scroll engine — guard: do NOT start if velocity engine is running
+    if (!speechRafRef.current) rafRef.current = requestAnimationFrame(loop);
     if (recordingEnabledRef.current && !isRecordingRef.current) startRecording();
     if (voicePersonaRef.current) startVoiceover();
   }, [measure, loop]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doPause = useCallback(() => {
     playingRef.current = false; lastTRef.current = null;
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     setPlaying(false); clearInterval(tIntRef.current);
     if (isRecordingRef.current) stopRecording();
     stopVoiceover();
+    // Speech velocity engine: signal pause but keep RAF running so it decelerates naturally
+    if (speechRafRef.current) {
+      speechActiveRef.current = false;
+      speechPausedRef.current = true;
+    }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doRun = useCallback((text, ttl, segments, aiFormatted) => {
@@ -1084,11 +1194,10 @@ export default function PrompterX() {
     const wasRecording = isRecordingRef.current; // capture before doPause clears it
     doPause(); clearInterval(tIntRef.current);
     releaseWakeLock();
-    stopSpeechTracking();   // also calls stopSmoothScrollLoop internally
-    stopSmoothScrollLoop(); // safety net in case stopSpeechTracking was already called
+    stopSpeechTracking(); // calls stopVelocityScrollEngine internally
     if (wasRecording) {
       stopRecording();
-      setTimeout(() => setScreen("home"), 500); // wait for mr.onstop to flush and save
+      setTimeout(() => setScreen("home"), 500);
     } else {
       setScreen("home");
     }
@@ -1101,16 +1210,17 @@ export default function PrompterX() {
     pauseSegRef.current   = -1;    currentSegRef.current = 0;
     actualSpeedRef.current = 1.0;  setCurrentSeg(0);
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
-    // Reset smooth scroll and sentence highlights
     resetSpeechState();
     if (speechTrackingRef.current) {
-      // Rebuild sentence map from same text and restart glide loop
       const isAiMode = aiFormattedRef.current && segmentsRef.current.length > 0;
       const text = isAiMode ? segmentsRef.current.map(s => s.text).join(" ") : runTextRef.current;
       buildSentenceMap(text);
-      lastWordIdxRef.current = 0;
-      stopSmoothScrollLoop();
-      startSmoothScrollLoop();
+      stopVelocityScrollEngine();
+      // Recalibrate + restart engine after DOM settles
+      setTimeout(() => {
+        calibrateScrollGeometry();
+        startVelocityScrollEngine();
+      }, 300);
       document.querySelectorAll("[data-word-index]").forEach(el => {
         el.classList.remove("px-sent-current", "px-sent-next", "px-sent-past");
       });
